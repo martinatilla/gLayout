@@ -73,7 +73,10 @@ def two_tran_interdigitized_netlist(
     n_or_p_fet: Optional[str] = 'nfet',
     subckt_only: Optional[bool] = False,
     dummies_tied_to_bulk: bool = True,
+    shared_gate: bool = False,
 ) -> Netlist:
+    # shared_gate: the layout has one gate rail (see macro_two_transistor_interdigitized),
+    # so both devices sit on VG1 and there is no VG2 pin.
     if length is None:
         length = pdk.get_grule('poly')['min_width']
     if width is None:
@@ -93,9 +96,10 @@ def two_tran_interdigitized_netlist(
     # X-prefix is sky130's magic+netgen tech expectation; klayout decks
     # that classify primitive MOSFETs by SPICE prefix get their netlist
     # X→M-rewritten by the LVS runner.
+    gate_b = "VG1" if shared_gate else "VG2"
     source_netlist = """.subckt {circuit_name} {nodes} """ + f'l={length} w={width} m={1} '+ f"""
 XA VDD1 VG1 VSS1 VB {model} l={length} w={width} m={mtop}
-XB VDD2 VG2 VSS2 VB {model} l={length} w={width} m={mtop}"""
+XB VDD2 {gate_b} VSS2 VB {model} l={length} w={width} m={mtop}"""
     if with_dummy:
         source_netlist += f"\nXDUMMY {dum_node} {dum_node} {dum_node} VB {model} l={length} w={width} m={2}"
     source_netlist += "\n.ends {circuit_name}"
@@ -104,7 +108,7 @@ XB VDD2 VG2 VSS2 VB {model} l={length} w={width} m={mtop}"""
 
     return Netlist(
         circuit_name='two_trans_interdigitized',
-        nodes=['VDD1', 'VDD2', 'VSS1', 'VSS2', 'VG1', 'VG2', 'VB'],
+        nodes=['VDD1', 'VDD2', 'VSS1', 'VSS2', 'VG1'] + ([] if shared_gate else ['VG2']) + ['VB'],
         source_netlist=source_netlist,
         instance_format=instance_format,
         parameters={
@@ -120,6 +124,7 @@ def macro_two_transistor_interdigitized(
     numcols: int,
     deviceA_and_B: Literal["nfet", "pfet"],
     dummy: Union[bool, tuple[bool, bool]] = True,
+    shared_gate: bool = False,
     **kwargs
 ) -> Component:
     """place two transistors in a single row with interdigitized placement
@@ -130,7 +135,9 @@ def macro_two_transistor_interdigitized(
     numcols = a single col is actually one col for both transistors (so AB). 2 cols = ABAB ... so on
     deviceA_and_B = the device to place for both transistors (either nfet or pfet)
     dummy = place dummy at the edges of the interdigitized place (true by default). you can specify tuple to place only on one side
-    kwargs = key word arguments for device. 
+    shared_gate = A and B gates are the same net (e.g. a current mirror). B's gate vias land on A's gate rail
+        and a single gate bus is drawn; the B_gate_* ports alias the A_gate_* ports. default False
+    kwargs = key word arguments for device.
     ****NOTE: These are the same as glayout.flow.primitives.fet.multiplier arguments EXCLUDING dummy, sd_route_extension, and pdk options
     """
     if isinstance(dummy, bool):
@@ -148,7 +155,8 @@ def macro_two_transistor_interdigitized(
     devB_sd_extension = pdk.util_max_metal_seperation() + abs(center_devA.ports["drain_N"].center[1]-center_devA.ports["diff_N"].center[1])
     devB_gate_extension = pdk.util_max_metal_seperation() + abs(center_devA.ports["row0_col0_gate_S"].center[1]-center_devA.ports["gate_S"].center[1])
     kwargs["sd_route_extension"] = pdk.snap_to_2xgrid(devB_sd_extension)
-    kwargs["gate_route_extension"] = pdk.snap_to_2xgrid(devB_gate_extension)
+    # a shared gate needs no second track: keep B's gate rail at A's height
+    kwargs["gate_route_extension"] = 0 if shared_gate else pdk.snap_to_2xgrid(devB_gate_extension)
     center_devB = multiplier(**kwargs)
     kwargs["dummy"] = (False,True) if dummy[1] else False
     rightmost_devB = multiplier(**kwargs)
@@ -175,7 +183,8 @@ def macro_two_transistor_interdigitized(
         desired_end_layer = pdk.layer_to_glayer(refs[i].ports["row0_col0_rightsd_top_met_N"].layer)
         idplace << straight_route(pdk, refs[i].ports["row0_col0_rightsd_top_met_N"],refs[-1].ports["drain_E"],glayer2=desired_end_layer)
         idplace << straight_route(pdk, refs[i].ports["leftsd_top_met_N"],refs[-1].ports["drain_E"],glayer2=desired_end_layer)
-        if not i%2:
+        # with a shared gate rail, A and B gate poly already have equal length
+        if not i%2 and not shared_gate:
             desired_gate_end_layer = "poly"
             idplace << straight_route(pdk, refs[i].ports["row0_col0_gate_S"], refs[-1].ports["gate_E"],glayer2=desired_gate_end_layer)
     # merge s/d layer for all transistors
@@ -186,7 +195,10 @@ def macro_two_transistor_interdigitized(
     A_drain = idplace << rename_ports_by_orientation(rename_ports_by_list(straight_route(pdk, refs[0].ports["drain_W"], refs[-1].ports["drain_E"]), [("route_","_")]))
     B_drain = idplace << rename_ports_by_orientation(rename_ports_by_list(straight_route(pdk, refs[-1].ports["drain_E"], refs[0].ports["drain_W"]), [("route_","_")]))
     A_gate = idplace << rename_ports_by_orientation(rename_ports_by_list(straight_route(pdk, refs[0].ports["gate_W"], refs[-1].ports["gate_E"]), [("route_","_")]))
-    B_gate = idplace << rename_ports_by_orientation(rename_ports_by_list(straight_route(pdk, refs[-1].ports["gate_E"], refs[0].ports["gate_W"]), [("route_","_")]))
+    if shared_gate:
+        B_gate = A_gate
+    else:
+        B_gate = idplace << rename_ports_by_orientation(rename_ports_by_list(straight_route(pdk, refs[-1].ports["gate_E"], refs[0].ports["gate_W"]), [("route_","_")]))
     # add route ports and return
     prefixes = ["A_source","B_source","A_drain","B_drain","A_gate","B_gate"]
     for i, ref in enumerate([A_src, B_src, A_drain, B_drain, A_gate, B_gate]):
@@ -276,7 +288,8 @@ def two_nfet_interdigitized(
         pdk,
         width=kwargs.get('width', 3), length=kwargs.get('length'), fingers=kwargs.get('fingers', 1), multipliers=numcols, with_dummy=dummy,
         n_or_p_fet="nfet",
-        subckt_only=True
+        subckt_only=True,
+        shared_gate=kwargs.get('shared_gate', False)
     )
     return base_multiplier
 
@@ -361,7 +374,8 @@ def two_pfet_interdigitized(
         pdk,
         width=kwargs.get('width', 3), length=kwargs.get('length'), fingers=kwargs.get('fingers', 1), multipliers=numcols, with_dummy=dummy,
         n_or_p_fet="pfet",
-        subckt_only=True
+        subckt_only=True,
+        shared_gate=kwargs.get('shared_gate', False)
     )
     return base_multiplier
 

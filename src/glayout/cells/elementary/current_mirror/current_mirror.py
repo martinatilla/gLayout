@@ -144,6 +144,7 @@ def current_mirror(
             dummy=with_dummy, 
             with_substrate_tap=False, 
             with_tie=False, 
+            shared_gate=True,
             **kwargs
         )
     elif device in ['pmos', 'pfet']:
@@ -153,16 +154,15 @@ def current_mirror(
             dummy=with_dummy, 
             with_substrate_tap=False, 
             with_tie=False, 
+            shared_gate=True,
             **kwargs
         )
     top_level.add_ports(interdigitized_fets.get_ports_list(), prefix="fet_")
     maxmet_sep = pdk.util_max_metal_seperation()
     # short source of the fets
     source_short = interdigitized_fets << c_route(pdk, interdigitized_fets.ports['A_source_E'], interdigitized_fets.ports['B_source_E'], extension=3*maxmet_sep, viaoffset=False)
-    # short gates of the fets
-    gate_short = interdigitized_fets << c_route(pdk, interdigitized_fets.ports['A_gate_W'], interdigitized_fets.ports['B_gate_W'], extension=3*maxmet_sep, viaoffset=False)
-    # short gate and drain of one of the reference 
-    interdigitized_fets << L_route(pdk, interdigitized_fets.ports['A_drain_W'], gate_short.ports['con_N'], viaoffset=False, fullbottom=False)
+    # the gates already share one rail (shared_gate=True); diode-connect the reference fet
+    interdigitized_fets << c_route(pdk, interdigitized_fets.ports['A_drain_W'], interdigitized_fets.ports['A_gate_W'], extension=3*maxmet_sep, viaoffset=False)
     
     top_level << interdigitized_fets
     if with_tie:
