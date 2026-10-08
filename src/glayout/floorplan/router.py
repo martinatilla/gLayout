@@ -11,6 +11,13 @@
    paper), then each pin gets a stub on its own layer (met1/met2) out to a
    landing point just outside its cell, with a via up to the router layer.
    Nodes and edges close to that via are reserved for the pin's net.
+   Combinations within half a pitch of the smallest HPWL are a tie, broken
+   toward the one whose route region holds the fewest landings already
+   chosen (longest nets choose first). Without this, a rail reaching both
+   block edges always took the first-listed side, so every such net piled
+   into the same channel. Spreading does not know how many pins a cell side
+   can land, so if it does not route, the first-listed rule is tried and
+   kept: it reproduces the original landings, and never routes worse.
 3. **Decomposition.** Multi-pin nets are connected in minimum-spanning-tree
    order; each new pin is routed to the part of its net already routed.
 4. **Net order.** More past failures first, then larger HPWL, then more pins.
@@ -25,6 +32,13 @@
 6. **Rip-up and reroute.** Nets that share a node with another net are
    ripped up, the history cost H of the nodes they used is raised, and they
    are rerouted. After 35 iterations with conflicts left, routing fails.
+7. **Detours.** Rip-up and reroute fixes conflicts, not detours: a net
+   walled off by other nets' landings routes around a block and counts as
+   routed. A routed net whose wire exceeds ``detour_ratio`` times the MST
+   of its landings (and by ``detour_min``) is re-landed: its side
+   combination is excluded, everything is routed again, and the change is
+   kept only if wirelength + c_via·vias goes down. Worst detour first, at
+   most ``max_relands`` tries.
 
 Layers are directional, so every bend is a via: the paper's low-bending rule
 is the via cost. Wires are drawn at via-pad width rather than minimum width,
@@ -77,12 +91,16 @@ class RouterTech:
     q: float = 1e-4
     kappa: float = 3.0
     max_iterations: int = 35
+    detour_ratio: float = 2.0                # 0 turns detour re-landing off
+    detour_min: float = 0.0                  # minimum excess wire to count as a detour
+    max_relands: int = 8
 
     def __post_init__(self):
         p = self.pitch
         self.c_via = self.c_via or 2 * p
         self.c_drc = self.c_drc or 20 * p
         self.h_inc = self.h_inc or 2 * p
+        self.detour_min = self.detour_min or 4 * p
 
     def pad(self, port_layer: str, z: int, layer: str) -> float:
         return self.access_pads.get((port_layer, z), {}).get(layer, 0.0)
@@ -470,31 +488,68 @@ def _try_landing(grid: RoutingGrid, pin: RouterPin, opt: AccessOption, claimed: 
     return None
 
 
-def _plan_access(grid: RoutingGrid, pt: Optional[ProcessTable]) -> tuple[dict[str, list[Landing]], list[str]]:
+def _combo_key(pins: Sequence[RouterPin], combo: Sequence[AccessOption]) -> tuple:
+    """Identity of one access option per pin, for excluding a side combination."""
+    return tuple((p.owner, o.side, round(o.x, 3), round(o.y, 3)) for p, o in zip(pins, combo))
+
+
+def _hpwl(pts: Sequence[tuple[float, float]]) -> float:
+    return (max(x for x, _ in pts) - min(x for x, _ in pts)) + (max(y for _, y in pts) - min(y for _, y in pts))
+
+
+def _plan_access(grid: RoutingGrid, pt: Optional[ProcessTable], exclude: Optional[dict[str, set[tuple]]] = None,
+                 spread: bool = True) -> tuple[dict[str, list[Landing]], list[str]]:
+    """Choose each pin's side and land it.
+
+    ``exclude``: net -> side combinations (``_combo_key``) not to choose.
+    ``spread=False`` breaks HPWL ties by option order alone (the original rule).
+    """
     t = grid.t
     margin = t.pitch * 1.5
-    # 1. side choice per net (paper step 2): exhaustive over pin options, min HPWL
-    chosen: dict[str, list[tuple[RouterPin, list[AccessOption]]]] = {}
+    exclude = exclude or {}
+
+    def est(o: AccessOption) -> tuple[float, float]:
+        dx, dy = _DIR[o.side]
+        return (o.x + dx * margin, o.y + dy * margin)
+
+    def chan(p: RouterPin, o: AccessOption) -> tuple[float, float]:
+        """Where the pin will land: just outside its cell, on the option's side."""
+        x0, y0, x1, y1 = grid.p.cells[p.cell]
+        return {"W": (x0 - margin, o.y), "E": (x1 + margin, o.y),
+                "S": (o.x, y0 - margin), "N": (o.x, y1 + margin)}[o.side]
+
+    taken: list[tuple[float, float]] = []      # landing estimates of the pins already given a side
+
+    def load(pts: Sequence[tuple[float, float]]) -> int:
+        """Landings already chosen inside the region a net with these landings would route through."""
+        x0, x1 = min(x for x, _ in pts) - margin, max(x for x, _ in pts) + margin
+        y0, y1 = min(y for _, y in pts) - margin, max(y for _, y in pts) + margin
+        return sum(x0 <= x <= x1 and y0 <= y <= y1 for x, y in taken)
+
+    # 1. side choice per net (paper step 2): exhaustive over pin options, min HPWL.
+    # Combinations within half a pitch of the minimum are ties (landings snap to
+    # the grid anyway), broken by load, then HPWL, then option order.
+    cands: dict[str, list[tuple[float, tuple[AccessOption, ...]]]] = {}
     for net, pins in grid.p.nets.items():
-        def est(o: AccessOption) -> tuple[float, float]:
-            dx, dy = _DIR[o.side]
-            return (o.x + dx * margin, o.y + dy * margin)
         opts = [p.options for p in pins]
-        combos = 1
-        for o in opts:
-            combos *= max(1, len(o))
-        if combos <= 4096:
-            best, best_hp = None, math.inf
-            for combo in itertools.product(*opts):
-                pts = [est(o) for o in combo]
-                hp = (max(p[0] for p in pts) - min(p[0] for p in pts)) + (max(p[1] for p in pts) - min(p[1] for p in pts))
-                if hp < best_hp - 1e-12:
-                    best, best_hp = combo, hp
-            pref = list(best)
-        else:
+        if math.prod(max(1, len(o)) for o in opts) <= 4096:
+            scored = [(_hpwl([est(o) for o in combo]), combo) for combo in itertools.product(*opts)]
+            kept = [s for s in scored if _combo_key(pins, s[1]) not in exclude.get(net, ())]
+            cands[net] = kept or scored
+        else:      # too many to enumerate: nearest option to the centroid (exclusions not applied)
             cx = sum(o.x for p in pins for o in p.options) / sum(len(p.options) for p in pins)
             cy = sum(o.y for p in pins for o in p.options) / sum(len(p.options) for p in pins)
-            pref = [min(p.options, key=lambda o: abs(est(o)[0] - cx) + abs(est(o)[1] - cy)) for p in pins]
+            cands[net] = [(0.0, tuple(min(p.options, key=lambda o: abs(est(o)[0] - cx) + abs(est(o)[1] - cy))
+                                      for p in pins))]
+    chosen: dict[str, list[tuple[RouterPin, list[AccessOption]]]] = {}
+    for net in sorted(cands, key=lambda n: (-min(hp for hp, _ in cands[n]), n)):     # longest nets first
+        pins = grid.p.nets[net]
+        best_hp = min(hp for hp, _ in cands[net])
+        ties = [(hp, c) for hp, c in cands[net] if hp <= best_hp + t.pitch / 2]
+        _, best = min(ties, key=lambda hc: (load([chan(p, o) for p, o in zip(pins, hc[1])]) if spread else 0,
+                                            round(hc[0], 9)))
+        pref = list(best)
+        taken.extend(chan(p, o) for p, o in zip(pins, pref))
         ranked = []
         for p, first in zip(pins, pref):
             rest = sorted((o for o in p.options if o is not first),
@@ -633,107 +688,137 @@ def _mst_order(grid: RoutingGrid, lands: list[Landing]) -> list[tuple[Landing, L
     return [(start, start)] + edges
 
 
-def route(problem: RoutingProblem, tech: RouterTech, title: str = "Route", verbose: bool = True) -> RoutingResult:
-    with ProcessTable(title, f"{len(problem.nets)} nets, pitch {tech.pitch}µm on {'/'.join(tech.layers)}") as pt:
-        with pt.stage("Grid") as st:
-            grid = RoutingGrid(problem, tech)
-            st.detail(f"{grid.nx}x{grid.ny}x2 nodes, {len(grid.blocked)} blocked by {len(problem.cells)} cells")
-        with pt.stage("Pin access") as st:
-            landings, unreachable = _plan_access(grid, pt)
-            n_land = sum(len(v) for v in landings.values())
-            sides = {}
-            for lands in landings.values():
-                for l in lands:
-                    sides[l.option.side] = sides.get(l.option.side, 0) + 1
-            st.detail(f"{n_land} pins landed, sides {sides}")
-            if unreachable:
-                st.fail(f"no legal landing: {unreachable}")
-        nets = [n for n in problem.nets if len(landings.get(n, [])) >= 2]
-        hpwl = {}
-        for n in nets:
-            xs = [l.x for l in landings[n]]
-            ys = [l.y for l in landings[n]]
-            hpwl[n] = (max(xs) - min(xs)) + (max(ys) - min(ys))
-        fails = {n: 0 for n in nets}
-        occ: dict[tuple, set[str]] = {}
-        hist: dict[tuple, float] = {}
-        paths: dict[str, list[list[tuple]]] = {}
-        dead: set[str] = set()
-        history = []
+def _path_wire(grid: RoutingGrid, plist: Sequence[Sequence[tuple]]) -> float:
+    """Router-layer wire length of a net's paths (vias and stubs not included)."""
+    wl = 0.0
+    for path in plist:
+        for a, b in zip(path, path[1:]):
+            if grid.layer(a) == grid.layer(b):
+                (ax, ay), (bx, by) = grid.xy(a), grid.xy(b)
+                wl += abs(ax - bx) + abs(ay - by)
+    return wl
 
-        def rip(net: str) -> None:
-            for path in paths.pop(net, []):
-                for n in path:
-                    s = occ.get(n)
-                    if s:
-                        s.discard(net)
-                        if not s:
-                            del occ[n]
 
-        def route_net(net: str) -> bool:
-            tree: set[tuple] = set()
-            out = []
-            for new, parent in _mst_order(grid, landings[net]):
-                if new is parent:
-                    tree.add(new.node)
-                    continue
-                path = bidirectional_astar(grid, net, new.node, tree, parent.node, occ, hist)
-                if path is None:
-                    return False
-                out.append(path)
-                tree.update(path)
-            paths[net] = out
-            for path in out:
-                for n in path:
-                    occ.setdefault(n, set()).add(net)
-            return True
+def _mst_length(pts: Sequence[tuple[float, float]]) -> float:
+    """Manhattan length of the minimum spanning tree over ``pts`` (Prim)."""
+    if len(pts) < 2:
+        return 0.0
+    dist = {i: abs(pts[i][0] - pts[0][0]) + abs(pts[i][1] - pts[0][1]) for i in range(1, len(pts))}
+    total = 0.0
+    while dist:
+        i = min(dist, key=dist.get)
+        total += dist.pop(i)
+        for k in dist:
+            dist[k] = min(dist[k], abs(pts[k][0] - pts[i][0]) + abs(pts[k][1] - pts[i][1]))
+    return total
 
-        with pt.stage("Route + rip-up/reroute") as st:
-            queue = sorted(nets, key=lambda n: (-fails[n], -hpwl[n], -len(landings[n]), n))
-            it = 0
-            conflicts = {}
-            while True:
-                it += 1
-                for net in queue:
-                    rip(net)
-                    if not route_net(net):
-                        dead.add(net)
-                conflicts = {n: s for n, s in occ.items() if len(s) > 1}
-                bad = sorted({net for s in conflicts.values() for net in s} - dead)
-                history.append({"iteration": it, "conflict_nodes": len(conflicts), "ripped": len(bad),
-                                "unroutable": len(dead)})
-                if not bad or it >= tech.max_iterations:
-                    break
-                for net in bad:
-                    fails[net] += 1
-                    for path in paths.get(net, []):
-                        for n in path:
-                            hist[n] = hist.get(n, 0.0) + tech.h_inc
-                queue = sorted(bad, key=lambda n: (-fails[n], -hpwl[n], -len(landings[n]), n))
-            st.detail(f"{it} iteration(s), {len(conflicts)} conflict node(s) left, {len(dead)} unroutable")
-        failed = sorted(dead | {net for s in conflicts.values() for net in s})
-        wl, vias = 0.0, 0
-        for net, plist in paths.items():
-            for path in plist:
-                for a, b in zip(path, path[1:]):
-                    if grid.layer(a) != grid.layer(b):
-                        vias += 1
-                    else:
-                        (ax, ay), (bx, by) = grid.xy(a), grid.xy(b)
-                        wl += abs(ax - bx) + abs(ay - by)
+
+def detours(result: RoutingResult) -> dict[str, float]:
+    """Routed nets whose wire exceeds ``detour_ratio`` times the MST of their landings,
+    and by at least ``detour_min``: net -> excess wire (µm)."""
+    t, g = result.tech, result.grid
+    out = {}
+    for net, plist in result.paths.items():
+        wire = _path_wire(g, plist)
+        ref = _mst_length([(l.x, l.y) for l in result.landings.get(net, [])])
+        if wire > t.detour_ratio * max(ref, t.pitch) and wire - ref >= t.detour_min:
+            out[net] = wire - ref
+    return out
+
+
+def _cost(r: RoutingResult) -> float:
+    return r.wirelength + r.tech.c_via * r.vias
+
+
+def _attempt(problem: RoutingProblem, tech: RouterTech, pt: ProcessTable,
+             exclude: Optional[dict[str, set[tuple]]] = None, spread: bool = True) -> RoutingResult:
+    """One routing pass: grid, pin access, routing with rip-up/reroute. Stages go to ``pt``."""
+    with pt.stage("Grid") as st:
+        grid = RoutingGrid(problem, tech)
+        st.detail(f"{grid.nx}x{grid.ny}x2 nodes, {len(grid.blocked)} blocked by {len(problem.cells)} cells")
+    with pt.stage("Pin access") as st:
+        landings, unreachable = _plan_access(grid, pt, exclude, spread)
+        n_land = sum(len(v) for v in landings.values())
+        sides = {}
         for lands in landings.values():
             for l in lands:
-                wl += abs(l.x - l.option.x) + abs(l.y - l.option.y)
-                vias += 1
-        success = not failed and not unreachable
-        with pt.stage("Result") as st:
-            st.detail(f"wirelength {wl:.2f}µm, {vias} via stacks")
-            if not success:
-                st.fail(f"failed nets {failed}" + (f", unreachable pins {unreachable}" if unreachable else ""))
-        pt.result("routed", "yes" if success else "NO")
-        pt.result("iterations", it)
-        pt.result("wirelength_um", f"{wl:.2f}")
-        pt.result("vias", vias)
+                sides[l.option.side] = sides.get(l.option.side, 0) + 1
+        st.detail(f"{n_land} pins landed, sides {sides}")
+        if unreachable:
+            st.fail(f"no legal landing: {unreachable}")
+    nets = [n for n in problem.nets if len(landings.get(n, [])) >= 2]
+    hpwl = {}
+    for n in nets:
+        xs = [l.x for l in landings[n]]
+        ys = [l.y for l in landings[n]]
+        hpwl[n] = (max(xs) - min(xs)) + (max(ys) - min(ys))
+    fails = {n: 0 for n in nets}
+    occ: dict[tuple, set[str]] = {}
+    hist: dict[tuple, float] = {}
+    paths: dict[str, list[list[tuple]]] = {}
+    dead: set[str] = set()
+    history = []
+
+    def rip(net: str) -> None:
+        for path in paths.pop(net, []):
+            for n in path:
+                s = occ.get(n)
+                if s:
+                    s.discard(net)
+                    if not s:
+                        del occ[n]
+
+    def route_net(net: str) -> bool:
+        tree: set[tuple] = set()
+        out = []
+        for new, parent in _mst_order(grid, landings[net]):
+            if new is parent:
+                tree.add(new.node)
+                continue
+            path = bidirectional_astar(grid, net, new.node, tree, parent.node, occ, hist)
+            if path is None:
+                return False
+            out.append(path)
+            tree.update(path)
+        paths[net] = out
+        for path in out:
+            for n in path:
+                occ.setdefault(n, set()).add(net)
+        return True
+
+    with pt.stage("Route + rip-up/reroute") as st:
+        queue = sorted(nets, key=lambda n: (-fails[n], -hpwl[n], -len(landings[n]), n))
+        it = 0
+        conflicts = {}
+        while True:
+            it += 1
+            for net in queue:
+                rip(net)
+                if not route_net(net):
+                    dead.add(net)
+            conflicts = {n: s for n, s in occ.items() if len(s) > 1}
+            bad = sorted({net for s in conflicts.values() for net in s} - dead)
+            history.append({"iteration": it, "conflict_nodes": len(conflicts), "ripped": len(bad),
+                            "unroutable": len(dead)})
+            if not bad or it >= tech.max_iterations:
+                break
+            for net in bad:
+                fails[net] += 1
+                for path in paths.get(net, []):
+                    for n in path:
+                        hist[n] = hist.get(n, 0.0) + tech.h_inc
+            queue = sorted(bad, key=lambda n: (-fails[n], -hpwl[n], -len(landings[n]), n))
+        st.detail(f"{it} iteration(s), {len(conflicts)} conflict node(s) left, {len(dead)} unroutable")
+    failed = sorted(dead | {net for s in conflicts.values() for net in s})
+    wl, vias = 0.0, 0
+    for net, plist in paths.items():
+        wl += _path_wire(grid, plist)
+        vias += sum(1 for path in plist for a, b in zip(path, path[1:]) if grid.layer(a) != grid.layer(b))
+    for lands in landings.values():
+        for l in lands:
+            wl += abs(l.x - l.option.x) + abs(l.y - l.option.y)
+            vias += 1
+    success = not failed and not unreachable
     spots = [grid.xy(n) for n in conflicts]
     for net in dead:
         spots += [(l.x, l.y) for l in landings.get(net, [])]
@@ -742,9 +827,70 @@ def route(problem: RoutingProblem, tech: RouterTech, title: str = "Route", verbo
             for p in pins:
                 if p.owner == owner:
                     spots += [(o.x, o.y) for o in p.options]
-    result = RoutingResult(success, it, failed, unreachable, paths, landings, wl, vias, len(conflicts), tech,
-                           grid, history, spots)
-    if verbose and len(history) > 1:
+    return RoutingResult(success, it, failed, unreachable, paths, landings, wl, vias, len(conflicts), tech,
+                         grid, history, spots)
+
+
+def _reland_detours(problem: RoutingProblem, tech: RouterTech, result: RoutingResult, st,
+                    spread: bool = True) -> RoutingResult:
+    """Retry detoured nets with their side combination excluded (module docstring, step 7)."""
+    found = detours(result)
+    if not found:
+        st.detail("none")
+        return result
+    best, exclude, tried, kept = result, {}, set(), []
+    for _ in range(tech.max_relands):
+        cand = {n: e for n, e in detours(best).items() if n not in tried}
+        if not cand:
+            break
+        net = max(cand, key=lambda n: (cand[n], n))
+        tried.add(net)
+        pins = problem.nets[net]
+        landed = {l.pin.owner: l.option for l in best.landings.get(net, [])}
+        if any(p.owner not in landed for p in pins):
+            continue
+        trial_ex = {**exclude, net: set(exclude.get(net, ())) | {_combo_key(pins, [landed[p.owner] for p in pins])}}
+        trial = _attempt(problem, tech, ProcessTable("detour retry"), trial_ex, spread)     # never printed
+        if trial.success and _cost(trial) < _cost(best) - 1e-9:
+            best, exclude = trial, trial_ex
+            kept.append(net)
+    found_txt = ", ".join(f"{n} +{e:.1f}µm" for n, e in sorted(found.items()))
+    if kept:
+        st.detail(f"{found_txt}; re-landed {', '.join(kept)}: wirelength {result.wirelength:.1f} -> "
+                  f"{best.wirelength:.1f}µm, vias {result.vias} -> {best.vias}")
+    else:
+        st.detail(f"{found_txt}; no re-landing was cheaper")
+    return best
+
+
+def route(problem: RoutingProblem, tech: RouterTech, title: str = "Route", verbose: bool = True) -> RoutingResult:
+    with ProcessTable(title, f"{len(problem.nets)} nets, pitch {tech.pitch}µm on {'/'.join(tech.layers)}") as pt:
+        result, spread = _attempt(problem, tech, pt), True
+        if not result.success:
+            # spreading ties ignores how many pins a cell side can land: it can
+            # take the spot a pin with no other legal side needed. The original
+            # tie rule reproduces the old router's landings, so never route worse.
+            # On a double failure the plain result is kept too, so the closed
+            # loop sees the same failure spots and grows the same padding.
+            with pt.stage("Ties fallback") as st:
+                result, spread = _attempt(problem, tech, ProcessTable("plain ties"), spread=False), False    # never printed
+                if result.success:
+                    st.detail("spread side ties did not route; first-listed sides do")
+                else:
+                    st.warn("first-listed sides do not route either")
+        if result.success and tech.detour_ratio > 0:
+            with pt.stage("Detours") as st:
+                result = _reland_detours(problem, tech, result, st, spread)
+        with pt.stage("Result") as st:
+            st.detail(f"wirelength {result.wirelength:.2f}µm, {result.vias} via stacks")
+            if not result.success:
+                st.fail(f"failed nets {result.failed_nets}"
+                        + (f", unreachable pins {result.unreachable}" if result.unreachable else ""))
+        pt.result("routed", "yes" if result.success else "NO")
+        pt.result("iterations", result.iterations)
+        pt.result("wirelength_um", f"{result.wirelength:.2f}")
+        pt.result("vias", result.vias)
+    if verbose and len(result.history) > 1:
         print_table(f"{title}: rip-up/reroute", ["iteration", "conflict nodes", "ripped", "unroutable"],
-                    [(h["iteration"], h["conflict_nodes"], h["ripped"], h["unroutable"]) for h in history])
+                    [(h["iteration"], h["conflict_nodes"], h["ripped"], h["unroutable"]) for h in result.history])
     return result

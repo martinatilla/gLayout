@@ -6,13 +6,23 @@ import os
 
 os.environ.setdefault("GLAYOUT_TABLES", "0")
 
+from dataclasses import replace  # noqa: E402
+
 from glayout.floorplan.router import (  # noqa: E402
-    AccessOption, RouterPin, RouterTech, RoutingProblem, _f, _too_close, route,
+    AccessOption, RouterPin, RouterTech, RoutingProblem, _f, _too_close, detours, route,
 )
 
 
 def _pin(net, owner, cell, side, x, y):
     return RouterPin(net, owner, cell, [AccessOption(side, x, y, "met2", 0.5)])
+
+
+def _rail(net, owner, cell, w, e):
+    """A rail reaching both edges of its cell: (x, y) of its W end and of its E end."""
+    return RouterPin(net, owner, cell, [AccessOption("W", *w, "met2", 0.5), AccessOption("E", *e, "met2", 0.5)])
+
+
+_STACK = [(3.0, 2.0, 17.0, 8.0), (3.0, 12.0, 17.0, 18.0)]    # two blocks, one above the other
 
 
 def _two_cells(extra_cells=(), width=20.0, height=20.0):
@@ -87,6 +97,31 @@ def test_close_pins_on_one_side_are_staggered():
     assert _shapes_ok(rr)
     xs = sorted(l.x for ls in rr.landings.values() for l in ls if l.option.side == "E")
     assert len(set(xs)) > 1              # could not all land on the same column
+
+
+def test_side_ties_spread_over_both_channels():
+    # each net's W/W and E/E choices have the same HPWL; they used to both take
+    # the first-listed side (W) and share one channel
+    nets = {"A": [_rail("A", "T.A", 1, (3.0, 16.0), (17.0, 16.0)), _rail("A", "B.A", 0, (3.0, 6.0), (17.0, 6.0))],
+            "B": [_rail("B", "T.B", 1, (3.0, 15.0), (17.0, 15.0)), _rail("B", "B.B", 0, (3.0, 5.0), (17.0, 5.0))]}
+    rr = route(RoutingProblem(20.0, 20.0, list(_STACK), nets), RouterTech.abstract())
+    sides = {net: {l.option.side for l in lands} for net, lands in rr.landings.items()}
+    assert rr.success and sides == {"A": {"W"}, "B": {"E"}}
+    assert _shapes_ok(rr)
+
+
+def test_detour_is_relanded_on_the_other_side():
+    # W/W has the smaller HPWL (10 vs 14, not a tie), but a third block seals the
+    # left channel between the pins, so the W route has to go around both blocks
+    wall = (0.0, 8.0, 3.0, 12.0)
+    nets = {"A": [_rail("A", "T.A", 1, (3.0, 16.0), (17.0, 17.0)), _rail("A", "B.A", 0, (3.0, 6.0), (17.0, 3.0))]}
+    prob = RoutingProblem(20.0, 20.0, list(_STACK) + [wall], nets)
+    plain = route(prob, replace(RouterTech.abstract(), detour_ratio=0))
+    assert plain.success and {l.option.side for l in plain.landings["A"]} == {"W"}
+    rr = route(prob, RouterTech.abstract())
+    assert rr.success and {l.option.side for l in rr.landings["A"]} == {"E"}
+    assert rr.wirelength < plain.wirelength / 2 and detours(rr) == {}
+    assert _shapes_ok(rr)
 
 
 def test_dynamic_weighting_eq5():
