@@ -89,6 +89,15 @@ class Circuit:
             return "ground"
         return "signal"
 
+    def hetero_graph(self):
+        """Device + block heterograph for learning (``glayout.schematic.graph``, schema v1).
+
+        Both levels when the circuit comes from a schematic, the block level otherwise.
+        ``graph()`` below is the block-only graph of the paper, unchanged.
+        """
+        from glayout.schematic.graph import circuit_graph
+        return circuit_graph(self)
+
     def graph(self) -> CircuitGraph:
         nodes: list[dict] = []
         edges: list[tuple[int, int, str]] = []
