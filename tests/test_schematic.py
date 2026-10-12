@@ -12,7 +12,7 @@ from pathlib import Path
 
 from glayout.schematic import (
     Device, NetlistParseError, Schematic, analoggenie_category, from_textbook_circuit, net_class,
-    parse_analoggenie, parse_ports, read_analoggenie,
+    parse_analoggenie, parse_ports, read_analoggenie, read_analoggenie_opamp,
 )
 
 AG157 = """M4 (net23 VB1 VSS VSS) nmos4
@@ -36,6 +36,33 @@ C0 (VOUT1 net11) capacitor
 AG1300_EXCERPT = """L0 (net33 net20) inductor
 D0 (net36 net15) diode
 M2 (net15 VCONT3 VIN1 VIN1) pmos4
+"""
+
+# AnalogGenie 1000_full.cir (excerpt): a transmission gate holds an inverter; two TG instances at the top
+AG1000_FULL = """// Library name: Dataset
+// Cell name: INVERTER
+subckt INVERTER A Q VDD VSS
+    M0 (Q A VDD VDD) pmos4
+    M1 (Q A VSS VSS) nmos4
+ends INVERTER
+// Cell name: TRANSMISSION_GATE
+subckt TRANSMISSION_GATE A B C VDD VSS
+    M0 (A net8 B VDD) pmos4
+    M1 (A C B VSS) nmos4
+    I0 (C net8 VDD VSS) INVERTER
+ends TRANSMISSION_GATE
+// Cell name: 1000
+M6 (net10 net10 VSS VSS) nmos4
+C1 (net20 net19) capacitor
+I5 (net19 net34 VCLK2 VDD VSS) TRANSMISSION_GATE
+I4 (net10 net19 VCLK1 VDD VSS) TRANSMISSION_GATE
+"""
+AG1461_OPAMP = """MM3 (net23 VIN1 net17 VSS) nmos4
+MM0 (net12 VIN2 net17 VSS) nmos4
+MM4 (net17 VB2 VSS VSS) nmos4
+MM2 (net12 net12 VDD VDD) pmos4
+MM1 (net23 net12 VDD VDD) pmos4
+MM9 (VOUT1 net23 VDD VDD) pmos4
 """
 
 # PR #127 circuits.py, C08 (Circuit.to_json() form); AnalogGenie 157 with devices renamed
@@ -131,7 +158,38 @@ def test_port_file_and_folder_reader():
     assert a.to_json() == b.to_json()
     assert a.name == "ag157" and a.ports[0] == "VDD"
     assert a.provenance == {"dataset": "AnalogGenie", "analoggenie_id": 157,
-                            "category": "book:razavi_analog_cmos", "page_ref": "171"}
+                            "category": "book:razavi_analog_cmos", "page_ref": "171", "file": "157.cir"}
+
+
+def test_subcircuits_are_flattened_to_transistors():
+    sch = parse_analoggenie(AG1000_FULL, "ag1000", ["VDD", "VSS", "VCLK1", "VCLK2"])
+    assert sch.kinds() == {"nfet": 5, "pfet": 4, "cap": 1}                 # 1 + 2 x (2 + inverter's 2)
+    assert sch["I5/M0"].pins == {"D": "net19", "G": "I5/net8", "S": "net34", "B": "VDD"}
+    assert sch["I5/I0/M0"].pins == {"D": "I5/net8", "G": "VCLK2", "S": "VDD", "B": "VDD"}
+    assert sch.provenance["flattened"] == ["I5:TRANSMISSION_GATE", "I5/I0:INVERTER", "I4:TRANSMISSION_GATE",
+                                           "I4/I0:INVERTER"]
+    assert sch.check() == ["net net20 has one pin (C1.P)"]                  # the excerpt cuts C1's other side
+    whole = parse_analoggenie(AG1000_FULL, "ag1000", flatten=False)
+    assert whole["I5"].kind == "composite:TRANSMISSION_GATE"
+
+
+def test_folder_reader_prefers_the_full_netlist_and_reads_opamp_extracts():
+    with tempfile.TemporaryDirectory() as tmp:
+        folder = Path(tmp) / "1000"
+        folder.mkdir()
+        (folder / "1000.cir").write_text(AG1000_FULL.split("// Cell name: 1000\n")[1])
+        (folder / "1000_full.cir").write_text(AG1000_FULL)
+        (folder / "Port1000.txt").write_text("VDD VSS VCLK1 VCLK2\n")
+        assert read_analoggenie(folder).provenance["file"] == "1000_full.cir"
+        assert "I5/M0" in [d.name for d in read_analoggenie(folder).devices]
+        assert read_analoggenie(folder, flatten=False)["I5"].kind == "composite:TRANSMISSION_GATE"
+        bg = Path(tmp) / "1461"
+        bg.mkdir()
+        (bg / "Opamp1461.cir").write_text(AG1461_OPAMP)
+        op = read_analoggenie_opamp(bg)
+    assert op.name == "ag1461_opamp" and op.provenance["variant"] == "opamp_extract"
+    assert op.provenance["category"] == "paper:bandgap" and op.provenance["ports_inferred"]
+    assert op.ports == ("VIN1", "VSS", "VIN2", "VB2", "VDD", "VOUT1")
 
 
 def test_categories():

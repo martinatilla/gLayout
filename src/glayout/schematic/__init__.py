@@ -13,8 +13,8 @@ Everything except ``to_circuit`` is pure Python.
 from glayout.schematic.model import MOS, NET_CLASSES, PINS, Device, Schematic, net_class
 from glayout.schematic.annotate import AnnotatedBlock, Annotation, Matched, Structure, annotate
 from glayout.schematic.readers import (
-    AG_CATEGORIES, AG_KINDS, NetlistParseError, analoggenie_category, from_textbook_circuit,
-    parse_analoggenie, parse_ports, read_analoggenie,
+    AG_CATEGORIES, AG_KINDS, NetlistParseError, analoggenie_category, from_textbook_circuit, infer_ports,
+    parse_analoggenie, parse_ports, parse_subckts, read_analoggenie, read_analoggenie_opamp,
 )
 from glayout.schematic.sizing import BlockSize, Sizing, size_schematic
 from glayout.schematic.textbook import curated, textbook_schematic, two_stage_ota_schematic
@@ -25,8 +25,9 @@ _LAZY = ("schematic_to_circuit", "schematic_routed", "UnsupportedCircuit", "pdk_
 __all__ = [
     "AG_CATEGORIES", "AG_KINDS", "AnnotatedBlock", "Annotation", "BlockSize", "Device", "HeteroGraph", "MOS",
     "Matched", "NET_CLASSES", "NetlistParseError", "PINS", "SCHEMA_VERSION", "Schematic", "Sizing", "Structure",
-    "analoggenie_category", "annotate", "circuit_graph", "curated", "from_textbook_circuit", "net_class",
-    "parse_analoggenie", "parse_ports", "read_analoggenie", "schematic_graph", "size_schematic",
+    "analoggenie_category", "annotate", "circuit_graph", "curated", "from_textbook_circuit", "infer_ports",
+    "net_class", "parse_analoggenie", "parse_ports", "parse_subckts", "read_analoggenie", "read_analoggenie_opamp",
+    "schematic_graph", "size_schematic",
     "textbook_schematic", "two_stage_ota_schematic", "validate_graph", *_LAZY,
 ]
 

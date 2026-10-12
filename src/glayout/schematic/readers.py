@@ -7,6 +7,11 @@ in ``Dataset/<id>/``:
   nets in pin order, type. Topology only, no sizes.
 - ``Port<id>.txt``: the external nets on the first line.
 - ``Pagenumber<id>.txt``: book page or paper reference.
+- ``<id>_full.cir`` (32 entries): the same netlist in Spectre form with
+  ``subckt`` definitions of the composite cells it uses (inverter,
+  transmission gate, NAND, NOR, XOR, PFD), so it flattens to transistors.
+- ``Opamp<id>.cir`` (the bandgap and LDO entries): the error amplifier on its
+  own; its ports are not listed anywhere, so they are inferred from net names.
 - ``Book<id>.png``, ``Cadence<id>.png``: textbook scan and schematic capture;
   never read here.
 
@@ -79,13 +84,64 @@ def parse_ports(text: str) -> tuple[str, ...]:
     return ()
 
 
+_SUBCKT = re.compile(r"^\s*subckt\s+(\S+)\s+(.*?)\s*$")
+_ENDS = re.compile(r"^\s*ends\b")
+_GLOBAL_NETS = {"0"}
+_COMMENT = ("*", "//", ";")
+
+
+def parse_subckts(text: str) -> tuple[dict[str, tuple[tuple[str, ...], list[tuple[int, str]]]], list[tuple[int, str]]]:
+    """Spectre ``subckt NAME pins ... ends NAME`` blocks, and the (line number, text) lines outside them."""
+    subckts: dict[str, tuple[tuple[str, ...], list[tuple[int, str]]]] = {}
+    top: list[tuple[int, str]] = []
+    current = None
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        m = _SUBCKT.match(raw)
+        if m:
+            current = m.group(1)
+            subckts[current] = (tuple(m.group(2).split()), [])
+        elif current is not None and _ENDS.match(raw):
+            current = None
+        elif current is not None:
+            subckts[current][1].append((lineno, raw))
+        else:
+            top.append((lineno, raw))
+    return subckts, top
+
+
+def _expand(lines, subckts, prefix: str, pinmap: dict, depth: int, out: list, problem, flattened: list) -> None:
+    """Device lines with subcircuit instances replaced by their (renamed, re-netted) contents."""
+    for lineno, raw in lines:
+        line = raw.strip()
+        if not line or line.startswith(_COMMENT):
+            continue
+        m = _LINE.match(line)
+        if not m:
+            out.append((lineno, None, line, None))
+            continue
+        dname, nets, dtype = m.group(1), m.group(2).split(), m.group(3)
+        nets = tuple(pinmap[n] if n in pinmap else n if (n in _GLOBAL_NETS or not prefix) else f"{prefix}{n}"
+                     for n in nets)
+        if dtype in subckts:
+            pins, body = subckts[dtype]
+            if len(pins) != len(nets) or depth > 8:
+                problem(f"line {lineno}: cannot expand {dname} ({dtype}: {len(pins)} pins, {len(nets)} nets)")
+                continue
+            flattened.append(f"{prefix}{dname}:{dtype}")
+            _expand(body, subckts, f"{prefix}{dname}/", dict(zip(pins, nets)), depth + 1, out, problem, flattened)
+        else:
+            out.append((lineno, f"{prefix}{dname}", nets, dtype))
+
+
 def parse_analoggenie(text: str, name: str, ports: Sequence[str] = (), strict: bool = True,
-                      provenance: Optional[dict] = None) -> Schematic:
-    """Parse the body of an AnalogGenie ``.cir`` file.
+                      provenance: Optional[dict] = None, flatten: bool = True) -> Schematic:
+    """Parse the body of an AnalogGenie ``.cir`` (or ``_full.cir``) file.
 
     ``strict``: a line that does not parse, an unknown device type or a pin count
     that does not fit raises ``NetlistParseError``; otherwise it becomes a warning
     (unknown types are kept as ``unknown:<type>``, unparsable lines are skipped).
+    ``flatten``: instances of ``subckt`` definitions found in the text are replaced
+    by their devices (``I5/M0``, local nets ``I5/net8``); otherwise composites stay whole.
     """
     devices: list[Device] = []
     warnings: list[str] = []
@@ -97,15 +153,14 @@ def parse_analoggenie(text: str, name: str, ports: Sequence[str] = (), strict: b
             raise NetlistParseError(f"{name}: {msg}")
         warnings.append(msg)
 
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith(("*", "//", ";")):
+    subckts, top = parse_subckts(text)
+    flattened: list[str] = []
+    items: list = []
+    _expand(top, subckts if flatten else {}, "", {}, 0, items, problem, flattened)
+    for lineno, dname, nets, dtype in items:
+        if dname is None:
+            problem(f"line {lineno}: cannot parse {nets!r}")
             continue
-        m = _LINE.match(line)
-        if not m:
-            problem(f"line {lineno}: cannot parse {line!r}")
-            continue
-        dname, nets, dtype = m.group(1), tuple(m.group(2).split()), m.group(3)
         kind = AG_KINDS.get(dtype)
         if kind is None:
             problem(f"line {lineno}: unknown device type {dtype!r} ({dname})")
@@ -128,28 +183,57 @@ def parse_analoggenie(text: str, name: str, ports: Sequence[str] = (), strict: b
     prov = dict(provenance or {})
     if renamed:
         prov["renamed"] = renamed
+    if flattened:
+        prov["flattened"] = flattened
     return Schematic(name, tuple(ports), tuple(devices), prov, {}, warnings)
 
 
-def read_analoggenie(path: Union[str, Path], ag_id: Optional[int] = None, strict: bool = True) -> Schematic:
+def read_analoggenie(path: Union[str, Path], ag_id: Optional[int] = None, strict: bool = True,
+                     flatten: bool = True) -> Schematic:
     """Read one AnalogGenie entry.
 
     ``path`` is the entry folder (``.../Dataset/157``), or the dataset root
-    (``.../Dataset``) together with ``ag_id``.
+    (``.../Dataset``) together with ``ag_id``. ``flatten``: read ``<id>_full.cir``
+    when it exists, so composite cells become transistors.
     """
     folder = Path(path) / str(ag_id) if ag_id is not None else Path(path)
     ag = int(folder.name)
     cir = folder / f"{ag}.cir"
+    if flatten and (folder / f"{ag}_full.cir").exists():
+        cir = folder / f"{ag}_full.cir"
     if not cir.exists():
         raise FileNotFoundError(cir)
     port_file = folder / f"Port{ag}.txt"
     page_file = folder / f"Pagenumber{ag}.txt"
     ports = parse_ports(port_file.read_text()) if port_file.exists() else ()
     prov = {"dataset": "AnalogGenie", "analoggenie_id": ag, "category": analoggenie_category(ag),
-            "page_ref": page_file.read_text().strip() if page_file.exists() else None}
-    sch = parse_analoggenie(cir.read_text(errors="replace"), f"ag{ag}", ports, strict=strict, provenance=prov)
+            "page_ref": page_file.read_text().strip() if page_file.exists() else None, "file": cir.name}
+    sch = parse_analoggenie(cir.read_text(errors="replace"), f"ag{ag}", ports, strict=strict, provenance=prov,
+                            flatten=flatten)
     if not port_file.exists():
         sch.warnings.append(f"no Port{ag}.txt")
+    return sch
+
+
+_INTERNAL_NET = re.compile(r"^net\d+$", re.I)
+
+
+def infer_ports(sch: Schematic) -> tuple[str, ...]:
+    """AnalogGenie names internal nets ``net<N>``; every other net is taken as a port."""
+    return tuple(n for n in sch.nets() if not _INTERNAL_NET.match(n.split("/")[-1]) and "/" not in n)
+
+
+def read_analoggenie_opamp(path: Union[str, Path], ag_id: Optional[int] = None, strict: bool = True) -> Schematic:
+    """The ``Opamp<id>.cir`` extract of a bandgap or LDO entry, with inferred ports."""
+    folder = Path(path) / str(ag_id) if ag_id is not None else Path(path)
+    ag = int(folder.name)
+    cir = folder / f"Opamp{ag}.cir"
+    if not cir.exists():
+        raise FileNotFoundError(cir)
+    prov = {"dataset": "AnalogGenie", "analoggenie_id": ag, "category": analoggenie_category(ag),
+            "variant": "opamp_extract", "file": cir.name, "ports_inferred": True}
+    sch = parse_analoggenie(cir.read_text(errors="replace"), f"ag{ag}_opamp", (), strict=strict, provenance=prov)
+    sch.ports = infer_ports(sch)
     return sch
 
 
