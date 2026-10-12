@@ -51,6 +51,11 @@ class Circuit:
     ports: list[str] = field(default_factory=list)      # external nets (top-level pins for LVS)
     power_nets: tuple[str, ...] = ("VDD", "AVDD", "VCC")
     ground_nets: tuple[str, ...] = ("VSS", "GND", "AVSS")
+    # set when the circuit comes from a netlist (glayout.schematic.to_circuit):
+    # the transistor-level Schematic, its Annotation and its Sizing
+    schematic: Optional[object] = None
+    annotation: Optional[object] = None
+    sizing: Optional[object] = None
 
     def __post_init__(self):
         names = [i.name for i in self.instances]

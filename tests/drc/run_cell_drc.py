@@ -83,6 +83,23 @@ _CELL_BUILDERS: Dict[str, str] = {
     # Floorplanned *and routed* OTA (glayout.floorplan.router): DRC + end-to-end LVS
     "routed_two_stage_ota_drr":               "glayout.floorplan.examples:two_stage_ota_routed",
     "routed_two_stage_ota_closed_loop":       "glayout.floorplan.examples:two_stage_ota_routed",
+    # Netlist in (glayout.schematic): curated circuits annotated, sized, floorplanned and routed
+    # Parameters: tests/parameters/schematic_<pdk>.csv
+    "sch_c01_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c02_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c03_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c04_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c05_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c06_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c07_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c08_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c09_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c10_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c12_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c13_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c14_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_c18_routed":                         "glayout.schematic.to_circuit:schematic_routed",
+    "sch_two_stage_ota_routed":               "glayout.schematic.to_circuit:schematic_routed",
 }
 
 

@@ -1,10 +1,9 @@
 """Tests for glayout.schematic.annotate. No PDK needed.
 
 Ground truth: the 18 curated circuits of the textbook sharing benchmark
-(gLayout PR #127, ``circuits.py``) and their 30 declared matched pairs
-(``matching.MATCHED``), copied below; the hand-written two-stage OTA of
-``glayout.floorplan.examples``; and two AnalogGenie entries (MIT licence),
-1150 (LC VCO) and 2200 (LDO).
+(gLayout PR #127) and their 30 declared matched pairs, and the two-stage OTA
+of ``glayout.floorplan.examples`` (all in ``glayout.schematic.textbook``);
+and two AnalogGenie entries (MIT licence), 1150 (LC VCO) and 2200 (LDO).
 
 Run with pytest, or directly: ``python tests/test_annotate.py``.
 """
@@ -13,52 +12,7 @@ import re
 
 from glayout.schematic import parse_analoggenie
 from glayout.schematic.annotate import annotate
-
-TEXTBOOK = {
-    "C01": ("VSS IB1 IOUT1",
-            "M1 (IB1 IB1 VSS VSS) nmos4\nM2 (IOUT1 IB1 VSS VSS) nmos4"),
-    "C02": ("VSS IIN1 IOUT1",
-            "M1 (IIN1 IIN1 net6 VSS) nmos4\nM2 (net6 net6 VSS VSS) nmos4\nM3 (IOUT1 IIN1 net12 VSS) nmos4\nM4 (net12 net6 VSS VSS) nmos4"),
-    "C03": ("VSS IIN1 IOUT1",
-            "M1 (IIN1 Y VSS VSS) nmos4\nM2 (Y Y VSS VSS) nmos4\nM3 (IOUT1 IIN1 Y VSS) nmos4"),
-    "C04": ("VDD VSS VIN1 VOUT1 VB1",
-            "M1 (VOUT1 VB1 VDD VDD) pmos4\nM2 (VOUT1 VIN1 VSS VSS) nmos4"),
-    "C05": ("VDD VSS VIN1 VOUT1 VB1",
-            "M1 (VOUT1 VB1 VSS VSS) nmos4\nM2 (VDD VIN1 VOUT1 VSS) nmos4"),
-    "C06": ("VDD VSS VIN1 VOUT1 VB1 VB2 VB3",
-            "M1 (VOUT1 VB2 net10 VDD) pmos4\nM2 (net10 VB3 VDD VDD) pmos4\nM3 (net9 VIN1 VSS VSS) nmos4\nM4 (VOUT1 VB1 net9 VSS) nmos4"),
-    "C07": ("VDD VSS VIN1 VIN2 VOUT1 VOUT2 VB1 IB1",
-            "M1 (VOUT1 VIN1 IB1 VSS) nmos4\nM2 (VOUT2 VIN2 IB1 VSS) nmos4\nM3 (VOUT1 VB1 VDD VDD) pmos4\nM4 (VOUT2 VB1 VDD VDD) pmos4"),
-    "C08": ("VDD VSS VIN1 VIN2 VOUT1 VB1",
-            "M1 (net22 VIN1 net23 VSS) nmos4\nM2 (VOUT1 VIN2 net23 VSS) nmos4\nM3 (net23 VB1 VSS VSS) nmos4\nM4 (net22 net22 VDD VDD) pmos4\nM5 (VOUT1 net22 VDD VDD) pmos4"),
-    "C09": ("VDD VSS VIN1 VIN2 VOUT1 VB1 IB1",
-            "M1 (net018 VIN1 IB1 VSS) nmos4\nM2 (net016 VIN2 IB1 VSS) nmos4\nM3 (net04 VB1 net018 VSS) nmos4\nM4 (VOUT1 VB1 net016 VSS) nmos4\nM5 (net04 net04 net019 VDD) pmos4\nM6 (VOUT1 net04 net017 VDD) pmos4\nM7 (net019 net019 VDD VDD) pmos4\nM8 (net017 net019 VDD VDD) pmos4"),
-    "C10": ("VDD VSS VIN1 VIN2 VOUT1 VOUT2 VB1 VB2 VB3 VB4 IB1",
-            "M1 (net022 VIN1 IB1 VDD) pmos4\nM2 (net018 VIN2 IB1 VDD) pmos4\nM3 (net022 VB4 VSS VSS) nmos4\nM4 (net018 VB4 VSS VSS) nmos4\nM5 (VOUT1 VB1 net022 VSS) nmos4\nM6 (VOUT2 VB1 net018 VSS) nmos4\nM7 (VOUT1 VB2 net023 VDD) pmos4\nM8 (VOUT2 VB2 net021 VDD) pmos4\nM9 (net023 VB3 VDD VDD) pmos4\nM10 (net021 VB3 VDD VDD) pmos4"),
-    "C11": ("VDD VSS VIN1 VIN2 VOUT1 IB1",
-            "M1 (IB1 IB1 VDD VDD) pmos4\nM2 (net97 IB1 VDD VDD) pmos4\nM3 (net014 VIN1 net97 VDD) pmos4\nM4 (net016 VIN2 net97 VDD) pmos4\nM5 (net014 net014 VSS VSS) nmos4\nM6 (net016 net014 VSS VSS) nmos4\nM7 (VOUT1 IB1 VDD VDD) pmos4\nM8 (VOUT1 net016 VSS VSS) nmos4\nR1 (net016 net022) resistor\nC1 (net022 VOUT1) capacitor"),
-    "C12": ("VDD VSS VIN1 VOUT1",
-            "M1 (VOUT1 VIN1 VSS VSS) nmos4\nM2 (VOUT1 VIN1 VDD VDD) pmos4"),
-    "C13": ("VSS IIN1 IOUT1 IB1",
-            "M1 (IB1 IB1 VSS VSS) nmos4\nM2 (IIN1 IB1 net15 VSS) nmos4\nM3 (net15 IIN1 VSS VSS) nmos4\nM4 (IOUT1 IB1 net14 VSS) nmos4\nM5 (net14 IIN1 VSS VSS) nmos4"),
-    "C14": ("VSS IIN1 IOUT1 IREF1",
-            "M1 (IIN1 IIN1 VSS VSS) nmos4\nM2 (net11 IIN1 VSS VSS) nmos4\nM3 (IREF1 net11 VSS VSS) nmos4\nM4 (IOUT1 IREF1 net11 VSS) nmos4"),
-    "C15": ("VDD VSS VIN1 VOUT1",
-            "M1 (VOUT1 VIN1 VSS VSS) nmos4\nR1 (VDD VOUT1) resistor"),
-    "C16": ("VDD VSS VIN1 VIN2 VOUT1 VOUT2 IB1",
-            "M1 (VOUT1 VIN1 IB1 VSS) nmos4\nM2 (VOUT2 VIN2 IB1 VSS) nmos4\nR1 (VDD VOUT1) resistor\nR2 (VDD VOUT2) resistor"),
-    "C17": ("VDD VSS VIN1 VIN2 VOUT1 VOUT2 VB1",
-            "M1 (VOUT1 VIN1 net07 VSS) nmos4\nM2 (VOUT2 VIN2 net09 VSS) nmos4\nM3 (net06 VB1 VSS VSS) nmos4\nR1 (VDD VOUT1) resistor\nR2 (VDD VOUT2) resistor\nR3 (net07 net06) resistor\nR4 (net09 net06) resistor"),
-    "C18": ("VDD VSS VIN1 VOUT1 VB1",
-            "M1 (net13 VIN1 VSS VSS) nmos4\nM2 (net9 VB1 VDD VDD) pmos4\nM3 (net9 net9 net22 VSS) nmos4\nM4 (net13 net13 net22 VDD) pmos4\nM5 (VDD net9 VOUT1 VSS) nmos4\nM6 (VSS net13 VOUT1 VDD) pmos4"),
-}
-MATCHED = {"C01": [["M1", "M2"]], "C02": [["M2", "M4"], ["M1", "M3"]], "C03": [["M1", "M2"]],
-           "C07": [["M1", "M2"], ["M3", "M4"]], "C08": [["M1", "M2"], ["M4", "M5"]],
-           "C09": [["M1", "M2"], ["M3", "M4"], ["M5", "M6"], ["M7", "M8"]],
-           "C10": [["M1", "M2"], ["M3", "M4"], ["M5", "M6"], ["M7", "M8"], ["M9", "M10"]],
-           "C11": [["M3", "M4"], ["M5", "M6"], ["M1", "M2"]], "C13": [["M3", "M5"], ["M2", "M4"]],
-           "C14": [["M1", "M2"]], "C16": [["M1", "M2"], ["R1", "R2"]],
-           "C17": [["M1", "M2"], ["R1", "R2"], ["R3", "R4"]], "C18": [["M3", "M5"], ["M4", "M6"]]}
+from glayout.schematic.textbook import MATCHED, TEXTBOOK, textbook_schematic, two_stage_ota_schematic
 
 # pairs found beyond the declared ones, each checked by hand
 EXTRA = {
@@ -89,16 +43,6 @@ BLOCKS = {
 }
 SYMMETRIC_PAIRS = {"C16": [("R1", "R2")], "C17": [("R3", "R4"), ("R1", "R2")]}
 
-# glayout.floorplan.examples two-stage OTA, written as a netlist
-TWO_STAGE_OTA = """MA (N1 VINP VTAIL VSS) nmos4
-MB (N2 VINN VTAIL VSS) nmos4
-ML1 (N1 N1 VDD VDD) pmos4
-ML2 (N2 N1 VDD VDD) pmos4
-MR (IBIAS IBIAS VSS VSS) nmos4
-MT (VTAIL IBIAS VSS VSS) nmos4
-MK (VOUT IBIAS VSS VSS) nmos4
-MCS (VOUT N2 VDD VDD) pmos4
-"""
 AG1150 = """M1 (IB1 IB1 VDD VDD) pmos4
 M0 (net12 IB1 VDD VDD) pmos4
 L2 (net22 net10) inductor
@@ -139,8 +83,7 @@ C0 (VOUT1 net11) capacitor
 
 
 def _schematic(cid):
-    ports, body = TEXTBOOK[cid]
-    return parse_analoggenie(body, cid, ports.split())
+    return textbook_schematic(cid)
 
 
 def _pairs(pairs):
@@ -202,7 +145,7 @@ def test_degenerated_pair_and_its_resistors():
 
 def test_two_stage_ota_matches_the_hand_written_floorplan_circuit():
     # examples.two_stage_ota_circuit: DP, LOAD (CM), BIAS (3-device bank), CS; DP and LOAD self-symmetric
-    sch = parse_analoggenie(TWO_STAGE_OTA, "two_stage_ota", ["VINP", "VINN", "VOUT", "IBIAS", "VDD", "VSS"])
+    sch = two_stage_ota_schematic()
     ann = annotate(sch)
     _check_invariants(sch, ann)
     assert _blocks_str(ann) == "DP(MA MB)* CM(ML1 ML2)* BIAS(MR MT MK) CS(MCS)"
