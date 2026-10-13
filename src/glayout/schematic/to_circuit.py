@@ -18,9 +18,11 @@ device, any device's bulk, or a port); nets that stay inside the block are
 its own rails and get no pin. The bulk is always exported.
 
 Supported for now: MOS-only schematics whose nfet bodies sit on ground
-(a single p-substrate; an nfet body elsewhere needs an isolated p-well).
-pfet bodies may be on any net: every pfet block has its own n-well and tie
-ring. Anything else raises ``UnsupportedCircuit`` with a ``code``.
+(a single p-substrate; an nfet body elsewhere needs an isolated p-well) and
+with no transistor whose source is its drain (a MOS capacitor or varactor,
+which a finger row cannot draw). pfet bodies may be on any net: every pfet
+block has its own n-well and tie ring. Anything else raises
+``UnsupportedCircuit`` with a ``code``.
 """
 from __future__ import annotations
 
@@ -61,6 +63,10 @@ def check_supported(sch: Schematic) -> None:
     bad = [d.name for d in sch.devices if d.kind == "nfet" and net_class(d.net("B")) != "ground"]
     if bad:
         raise UnsupportedCircuit("nfet_body", f"{sch.name}: nfet body off ground for {', '.join(bad)}")
+    caps = [d.name for d in sch.devices if d.is_mos and d.net("D") == d.net("S")]
+    if caps:
+        raise UnsupportedCircuit("mos_cap", f"{sch.name}: source = drain (MOS capacitor or varactor) for "
+                                            f"{', '.join(caps)}; a finger row cannot draw it")
 
 
 @contextmanager

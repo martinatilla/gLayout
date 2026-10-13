@@ -9,7 +9,8 @@ os.environ.setdefault("GLAYOUT_TABLES", "0")
 from dataclasses import replace  # noqa: E402
 
 from glayout.floorplan.router import (  # noqa: E402
-    AccessOption, RouterPin, RouterTech, RoutingProblem, _f, _too_close, detours, route,
+    AccessOption, RouterPin, RouterTech, RoutingGrid, RoutingProblem, _f, _too_close, bidirectional_astar, detours,
+    route,
 )
 
 
@@ -118,6 +119,22 @@ def test_same_net_via_pads_overlap_only_when_concentric():
             for la, ra in a.shapes[1:]:
                 for lb, rb in b.shapes[1:]:
                     assert concentric or la != lb or not _too_close(ra, rb, 0.3), (a.pin.owner, b.pin.owner)
+
+
+class _ReversedSet(set):
+    """A set that iterates in another order, as a different string-hash seed can make it do."""
+    def __iter__(self):
+        return iter(sorted(set.__iter__(self), key=repr, reverse=True))
+
+
+def test_astar_does_not_depend_on_the_target_sets_order():
+    # two targets equally far from the source: the tie used to be broken by the set's iteration order,
+    # which follows string hashing (pin nodes are ("P", k)), so routes changed between interpreters
+    grid = RoutingGrid(RoutingProblem(10.0, 10.0, [], {}), RouterTech.abstract())
+    tree = [(0, 9, 3), (0, 9, 7)]
+    a = bidirectional_astar(grid, "N", (0, 0, 5), set(tree), tree[0], {}, {})
+    b = bidirectional_astar(grid, "N", (0, 0, 5), _ReversedSet(tree), tree[0], {}, {})
+    assert a == b
 
 
 def test_side_ties_spread_over_both_channels():

@@ -632,7 +632,10 @@ def bidirectional_astar(grid: RoutingGrid, net: str, source: tuple, target_tree:
     if source in target_tree:
         return [source]
     sides = []
-    for starts, goal in (([source], target_hint), (list(target_tree), source)):
+    # the tree's order is the heap's tie-break: a set's order follows string hashing (pin nodes are
+    # ("P", k)), which changes with every interpreter, and so did the routes; sort it instead
+    tree = sorted(target_tree, key=lambda n: (1, n[1], 0, 0) if n[0] == "P" else (0, *n))
+    for starts, goal in (([source], target_hint), (tree, source)):
         g = {s: 0.0 for s in starts}
         parent = {s: None for s in starts}
         heap = [(_f(0.0, h(s, goal), t.kappa), k, s) for k, s in enumerate(starts)]

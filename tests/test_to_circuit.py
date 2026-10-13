@@ -70,7 +70,9 @@ def test_two_stage_ota_matches_the_hand_written_circuit():
 def test_unsupported_circuits_say_why():
     for sch, code in ((textbook_schematic("C15"), "non_mos"),
                       (parse_analoggenie("M0 (VOUT1 VIN1 VOUT1 VOUT1) nmos4\nM1 (VOUT1 VB1 VSS VSS) nmos4", "x",
-                                         ["VIN1", "VOUT1", "VB1", "VSS"]), "nfet_body")):
+                                         ["VIN1", "VOUT1", "VB1", "VSS"]), "nfet_body"),
+                      (parse_analoggenie("M0 (VCTL VOUT1 VCTL VSS) nmos4\nM1 (VOUT1 VB1 VSS VSS) nmos4", "y",
+                                         ["VCTL", "VOUT1", "VB1", "VSS"]), "mos_cap")):
         try:
             schematic_to_circuit(pdk, sch)
         except UnsupportedCircuit as e:
