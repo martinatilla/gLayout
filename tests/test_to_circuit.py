@@ -41,6 +41,16 @@ def test_five_transistor_ota_circuit():
                 assert abs(spec["fingers"] * v.params["width"] - size.total_width(dev)) < 0.02
 
 
+def test_body_tied_inside_when_it_is_a_source_net():
+    c = schematic_to_circuit(pdk, textbook_schematic("C08"))
+    tied = {i.name: i.block.variants[0].component.info["bulk_tied"] for i in c.instances}
+    assert tied == {"DP1": False, "CM1": True, "BIAS1": True}      # DP1's sources are the tail, not its VSS body
+    assert "B" in c["DP1"].nets and "B" not in c["CM1"].nets
+    assert list(c["BIAS1"].nets.values()).count("VSS") == 1        # one VSS pin, reachable from every ring side
+    vss = next(p for k, p in c["BIAS1"].block.variants[0].pins.items() if c["BIAS1"].nets[k] == "VSS")
+    assert set(vss.sides) == set("NESW")
+
+
 def test_internal_nets_get_no_pin():
     c = schematic_to_circuit(pdk, textbook_schematic("C06"))    # two cascode stacks; net9 and net10 stay inside
     for inst in c.instances:

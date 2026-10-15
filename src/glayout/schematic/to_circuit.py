@@ -15,7 +15,10 @@ per-block scales are per instance.
 
 A block exports a net only if something outside it uses that net (another
 device, any device's bulk, or a port); nets that stay inside the block are
-its own rails and get no pin. The bulk is always exported.
+its own rails and get no pin. When the body is one of the block's
+source/drain nets (an NMOS mirror's VSS, a PMOS load's VDD), the cell ties
+that rail to its tie ring inside, and the two are one pin; otherwise the body
+is exported as its own pin ``B``.
 
 Supported for now: MOS-only schematics whose nfet bodies sit on ground
 (a single p-substrate; an nfet body elsewhere needs an isolated p-well) and
@@ -94,10 +97,14 @@ def _letters(i: int) -> str:
     return s
 
 
-def canonical_block(sch: Schematic, blk: AnnotatedBlock, external: set[str]) -> tuple[list[dict], dict[str, str], list[str]]:
-    """(devices with canonical nets, exported canonical pin -> circuit net, exported pins incl. ``B``).
+def canonical_block(sch: Schematic, blk: AnnotatedBlock,
+                    external: set[str]) -> tuple[list[dict], dict[str, str], list[str], Optional[str]]:
+    """(devices with canonical nets, canonical pin -> circuit net, exported pins, bulk net).
 
     Nets that stay inside the block are in ``devices`` only: they have no pin and no circuit net.
+    When the block's body is one of its source/drain nets (an NMOS mirror's VSS), that net is the
+    bulk net: the cell ties its rail to the tie ring, and it is exported instead of ``B``.
+    Otherwise ``B`` is exported for the body.
     """
     cnet: dict[str, str] = {}
     devices = []
@@ -110,10 +117,12 @@ def canonical_block(sch: Schematic, blk: AnnotatedBlock, external: set[str]) -> 
                 cnet[net] = f"n{len(cnet)}"
             spec[key] = cnet[net]
         devices.append(spec)
-    pins = [c for n, c in cnet.items() if n in external] + ["B"]
+    sd_nets = {sch[name].net(pin) for name in blk.devices for pin in ("D", "S")}
+    bulk = cnet[blk.body] if blk.body in sd_nets else None
+    pins = [c for n, c in cnet.items() if n in external or c == bulk] + ([] if bulk else ["B"])
     net_map = {c: n for n, c in cnet.items() if c in pins}
-    net_map["B"] = blk.body
-    return devices, net_map, pins
+    net_map["B"] = blk.body          # used only if the cell keeps a separate bulk pin
+    return devices, net_map, pins, bulk
 
 
 def _external_nets(sch: Schematic, blk: AnnotatedBlock) -> set[str]:
@@ -128,16 +137,17 @@ def _external_nets(sch: Schematic, blk: AnnotatedBlock) -> set[str]:
 
 
 def build_block_variants(pdk: MappedPDK, device_kind: str, devices: list[dict], base: list[int], pins: list[str],
-                         size: BlockSize, labels: bool = False,
-                         cache: Optional[dict] = None) -> list[tuple[dict, float, float, dict, object]]:
+                         size: BlockSize, labels: bool = False, cache: Optional[dict] = None,
+                         bulk: Optional[str] = None) -> list[tuple[dict, float, float, dict, object]]:
     """Build (or fetch) every variant: (params, width, height, pins, component).
 
-    ``devices`` are canonical (``canonical_block``); ``base`` their base finger counts.
+    ``devices`` are canonical (``canonical_block``); ``base`` their base finger counts; ``bulk`` the
+    source/drain net tied to the tie ring inside the cell, if any.
     """
     cache = BLOCK_CACHE if cache is None else cache
     key_body = {"pdk": pdk.name, "kind": device_kind, "devices": [[d["drain"], d["gate"], d["source"]] for d in devices],
                 "base": base, "unit": size.unit, "length": size.length, "splits": list(size.splits),
-                "pins": pins, "labels": labels}
+                "pins": pins, "labels": labels, "bulk": bulk}
     key = hashlib.sha256(json.dumps(key_body, sort_keys=True).encode()).hexdigest()[:12]
     if key in cache:
         return cache[key]
@@ -148,6 +158,7 @@ def build_block_variants(pdk: MappedPDK, device_kind: str, devices: list[dict], 
                 "devices": [{**d, "fingers": b * k} for d, b in zip(devices, base)],
                 "device": device_kind, "width": float(pdk.snap_to_2xgrid(width)), "length": size.length,
                 "pins": list(pins), "circuit_name": f"FS_{key}_K{k}".upper(), "name": f"fs_{key}_k{k}",
+                "bulk_net": bulk,
             }
             comp = finger_sequence_cell(pdk, **params)
             built.append((params, float(comp.xsize), float(comp.ysize),
@@ -170,15 +181,17 @@ def schematic_to_circuit(pdk: MappedPDK, sch: Schematic, ann: Optional[Annotatio
         for blk in ann.blocks:
             with pt.stage(blk.name) as st:
                 size = sizing.blocks[blk.name]
-                devices, net_map, pins = canonical_block(sch, blk, _external_nets(sch, blk))
+                devices, net_map, pins, bulk = canonical_block(sch, blk, _external_nets(sch, blk))
                 n_cached = len(BLOCK_CACHE if cache is None else cache)
                 base = [size.base[n] for n in blk.devices]
-                built = build_block_variants(pdk, blk.device_kind, devices, base, pins, size, labels, cache)
+                built = build_block_variants(pdk, blk.device_kind, devices, base, pins, size, labels, cache, bulk)
                 variants = [Variant(dict(p), w, h, pin_map, comp) for p, w, h, pin_map, comp in built]
+                net_map = {k: v for k, v in net_map.items() if k in variants[0].pins}
                 instances.append(Instance(blk.name, Block(blk.name, blk.kind, variants), net_map))
                 hit = len(BLOCK_CACHE if cache is None else cache) == n_cached
+                tied = " body tied inside" if built[0][4].info.get("bulk_tied") else ""
                 st.detail(f"{blk.kind} {' '.join(blk.devices)}: {len(variants)} variant(s), "
-                          f"pins {','.join(net_map[p] for p in pins)}{' (cached)' if hit else ''}")
+                          f"pins {','.join(net_map[p] for p in variants[0].pins)}{tied}{' (cached)' if hit else ''}")
         circuit = Circuit(sch.name, instances, symmetric_pairs=list(ann.symmetric_pairs),
                           self_symmetric=list(ann.self_symmetric), ports=list(sch.ports),
                           schematic=sch, annotation=ann, sizing=sizing)
