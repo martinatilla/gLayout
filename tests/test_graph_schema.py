@@ -1,4 +1,4 @@
-"""Tests for the device-level graph (glayout.schematic.graph, schema v1). No PDK needed.
+"""Tests for the device-level graph (glayout.schematic.graph, schema v2). No PDK needed.
 
 Run with pytest, or directly: ``python tests/test_graph_schema.py``.
 """
@@ -55,6 +55,15 @@ def test_device_pin_and_net_features():
     assert (tail["pins"], tail["devices"], tail["sd_pins"], tail["gate_pins"], tail["port"]) == (3, 3, 3, 0, 0)
     assert _row(d, "net", "VB1")["class=bias"] == 1 and _row(d, "net", "VB1")["port"] == 1
     assert _row(d, "net", "VDD")["body_pins"] == 2
+
+
+def test_matching_class_and_sensitivity_features():
+    sch, ann, d = _c08()
+    assert len(FEATURES["device"]) == 40 and len(FEATURES["net"]) == 15 and len(FEATURES["block"]) == 25
+    assert _row(d, "device", "M1")["match=precise"] == 1 and _row(d, "device", "M4")["match=moderate"] == 1
+    assert sum(v for k, v in _row(d, "device", "M3").items() if k.startswith("match=")) == 0
+    assert _row(d, "net", "VOUT1")["sens=sensitive"] == 1 and _row(d, "net", "VDD")["sens=supply"] == 1
+    assert _row(d, "net", "net22")["sens=other"] == 1
 
 
 def test_unsized_and_unannotated_graphs():

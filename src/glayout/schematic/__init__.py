@@ -5,7 +5,8 @@
 - ``annotate``: structures, matched devices and layout blocks
 - ``sizing``: synthetic, layout-only sizes per block
 - ``textbook``: the curated circuits (PR #127's 18 and the two-stage OTA)
-- ``graph``: device + block heterograph for learning (schema v1); ``vocab``: its one-hot vocabularies
+- ``graph``: device + block heterograph for learning (schema v2); ``vocab``: its one-hot vocabularies
+- ``layout_graph``: the same graph with a floorplan's and router's results added (layout stage)
 - ``to_circuit``: schematic → floorplanner ``Circuit`` (imported lazily, needs a PDK)
 
 Everything except ``to_circuit`` is pure Python.
@@ -19,6 +20,7 @@ from glayout.schematic.readers import (
 from glayout.schematic.sizing import BlockSize, Sizing, size_schematic
 from glayout.schematic.textbook import curated, textbook_schematic, two_stage_ota_schematic
 from glayout.schematic.graph import SCHEMA_VERSION, HeteroGraph, circuit_graph, schematic_graph, validate_graph
+from glayout.schematic.layout_graph import layout_graph
 
 _LAZY = ("schematic_to_circuit", "schematic_routed", "UnsupportedCircuit", "pdk_limits")
 
@@ -26,8 +28,8 @@ __all__ = [
     "AG_CATEGORIES", "AG_KINDS", "AnnotatedBlock", "Annotation", "BlockSize", "Device", "HeteroGraph", "MOS",
     "Matched", "NET_CLASSES", "NetlistParseError", "PINS", "SCHEMA_VERSION", "Schematic", "Sizing", "Structure",
     "analoggenie_category", "annotate", "circuit_graph", "curated", "from_textbook_circuit", "infer_ports",
-    "net_class", "parse_analoggenie", "parse_ports", "parse_subckts", "read_analoggenie", "read_analoggenie_opamp",
-    "schematic_graph", "size_schematic",
+    "layout_graph", "net_class", "parse_analoggenie", "parse_ports", "parse_subckts", "read_analoggenie",
+    "read_analoggenie_opamp", "schematic_graph", "size_schematic",
     "textbook_schematic", "two_stage_ota_schematic", "validate_graph", *_LAZY,
 ]
 

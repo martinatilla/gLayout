@@ -26,6 +26,19 @@ matcher works directly on pins and nets.
 4. **Symmetry for the floorplanner**: a block holding both halves of a
    symmetric pair is self-symmetric; two single-device blocks holding the two
    halves form a symmetric block pair.
+5. **How much it matters**, after Hastings (*The Art of Analog Layout*), in our
+   own rules:
+   - every matched set gets a matching class: ``precise`` for differential and
+     cross-coupled pairs (their mismatch is the circuit's offset), ``moderate``
+     for the rest of a differential path (loads, cascodes, passives) and for
+     two-device mirrors and their cascodes (their mismatch is a current error),
+     ``minimal`` for bias banks of three or more and diode/gate pairs; a block
+     takes the strongest class of the sets it holds whole;
+   - every net gets a sensitivity: ``supply``; ``noisy`` (clocks, and what an
+     inverter makes of a clock); ``sensitive`` (high-impedance nodes, reached by
+     drains with nothing holding them: no source, no diode, no cascode diode;
+     and the gates of precisely matched devices, i.e. the inputs); ``other``
+     (low-impedance internal nodes, bias lines).
 
 The matched sets are what a designer would declare; the PR #127 benchmark's
 30 declared pairs are all recovered (see ``tests/test_annotate.py``).
@@ -37,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
 from glayout.schematic.model import Device, Schematic, net_class
+from glayout.schematic.vocab import MATCH_CLASSES
 
 PASSIVES = ("res", "cap", "ind")
 _SUPPLY = ("power", "ground")
@@ -53,6 +67,7 @@ class Matched:
     devices: tuple[str, ...]
     reasons: list[str]
     symmetric: bool = False
+    precision: str = "minimal"    # precise / moderate / minimal (vocab.MATCH_CLASSES)
 
     def pairs(self) -> list[frozenset]:
         d = self.devices
@@ -66,6 +81,7 @@ class AnnotatedBlock:
     devices: tuple[str, ...]
     device_kind: str              # nfet / pfet / res / ... (one per block)
     body: Optional[str] = None
+    matching: str = "none"        # strongest class of the matched sets it holds whole, or "none"
 
 
 @dataclass
@@ -76,6 +92,7 @@ class Annotation:
     matched: list[Matched]
     symmetric_pairs: list[tuple[str, str]] = field(default_factory=list)   # block names
     self_symmetric: list[str] = field(default_factory=list)                # block names
+    net_sensitivity: dict[str, str] = field(default_factory=dict)          # net -> vocab.SENSITIVITY
 
     def block_of(self, device: str) -> AnnotatedBlock:
         for b in self.blocks:
@@ -94,23 +111,28 @@ class Annotation:
         return {
             "schematic": self.schematic,
             "blocks": [{"name": b.name, "kind": b.kind, "devices": list(b.devices), "device_kind": b.device_kind,
-                        "body": b.body} for b in self.blocks],
+                        "body": b.body, "matching": b.matching} for b in self.blocks],
             "structures": [{"kind": s.kind, "devices": list(s.devices)} for s in self.structures],
-            "matched": [{"devices": list(m.devices), "reasons": m.reasons, "symmetric": m.symmetric}
-                        for m in self.matched],
+            "matched": [{"devices": list(m.devices), "reasons": m.reasons, "symmetric": m.symmetric,
+                         "precision": m.precision} for m in self.matched],
             "symmetric_pairs": [list(p) for p in self.symmetric_pairs],
             "self_symmetric": list(self.self_symmetric),
+            "net_sensitivity": dict(self.net_sensitivity),
         }
 
     def summary(self) -> str:
         lines = [f"{self.schematic}: {len(self.blocks)} blocks"]
         for b in self.blocks:
             tag = " self-symmetric" if b.name in self.self_symmetric else ""
-            lines.append(f"  {b.name:<7} {b.kind:<5} {b.device_kind:<5} {' '.join(b.devices)}{tag}")
+            match = f" [{b.matching}]" if b.matching != "none" else ""
+            lines.append(f"  {b.name:<7} {b.kind:<5} {b.device_kind:<5} {' '.join(b.devices)}{match}{tag}")
         for a, b in self.symmetric_pairs:
             lines.append(f"  symmetric pair {a} / {b}")
         for m in self.matched:
-            lines.append(f"  matched {' '.join(m.devices)} ({', '.join(m.reasons)}){' sym' if m.symmetric else ''}")
+            lines.append(f"  matched {' '.join(m.devices)} ({', '.join(m.reasons)}){' sym' if m.symmetric else ''}"
+                         f" {m.precision}")
+        special = {k: [n for n, c in self.net_sensitivity.items() if c == k] for k in ("sensitive", "noisy")}
+        lines += [f"  {k} nets: {' '.join(v)}" for k, v in special.items() if v]
         return "\n".join(lines)
 
 
@@ -318,6 +340,58 @@ def _inverters_and_tgs(idx: _Index) -> list[Structure]:
     return out
 
 
+# ---- 5. matching classes and net sensitivity -------------------------------------
+def _precision(m: Matched) -> str:
+    if any(r in ("dp", "ccp") for r in m.reasons):
+        return "precise"
+    if m.symmetric:
+        return "moderate"
+    if ("mirror" in m.reasons and len(m.devices) == 2) or "cascode" in m.reasons:
+        return "moderate"
+    return "minimal"
+
+
+def _held(idx: _Index, net: str) -> bool:
+    """A node something holds at low impedance: a source on it, a diode, or a cascode diode
+    (a device from the net down to the drain of a device the net itself gates)."""
+    gated_drains = {d.net("D") for d in idx.on[("G", net)] if d.is_mos}
+    for name, pin in idx.pins_on[net]:
+        d = idx.dev[name]
+        if not d.is_mos:
+            continue
+        if pin == "S" or (pin == "D" and (idx.diode(d) or d.net("S") in gated_drains)):
+            return True
+    return False
+
+
+def _net_sensitivity(idx: _Index, matched: list[Matched], structures: list[Structure]) -> dict[str, str]:
+    precise_gates = {idx.dev[n].net("G") for m in matched if m.precision == "precise" for n in m.devices
+                     if idx.dev[n].is_mos}
+    out = {}
+    for net in idx.sch.nets():
+        cls = net_class(net)
+        if cls in _SUPPLY:
+            out[net] = "supply"
+        elif cls == "clock":
+            out[net] = "noisy"
+        elif net in precise_gates:
+            out[net] = "sensitive"
+        else:
+            drains = [d for d in idx.on[("D", net)] if d.is_mos]
+            out[net] = "sensitive" if drains and not _held(idx, net) else "other"
+    # an inverter driven by a clock makes the complementary clock
+    inverters = [(idx.dev[s.devices[0]].net("G"), idx.dev[s.devices[0]].net("D"))
+                 for s in structures if s.kind == "inverter"]
+    changed = True
+    while changed:
+        changed = False
+        for gate, drain in inverters:
+            if out.get(gate) == "noisy" and out.get(drain) != "noisy":
+                out[drain] = "noisy"
+                changed = True
+    return out
+
+
 def annotate(sch: Schematic) -> Annotation:
     idx = _Index(sch)
     structures: list[Structure] = []
@@ -390,7 +464,14 @@ def annotate(sch: Schematic) -> Annotation:
         if d.name not in used:
             block(_single_kind(idx, d, structures), (d.name,))
 
-    ann = Annotation(sch.name, blocks, structures, list(matched.values()))
+    for m in matched.values():
+        m.precision = _precision(m)
+    rank = {c: i for i, c in enumerate(MATCH_CLASSES)}
+    for b in blocks:
+        inside = [m.precision for m in matched.values() if set(m.devices) <= set(b.devices)]
+        b.matching = min(inside, key=rank.__getitem__) if inside else "none"
+    ann = Annotation(sch.name, blocks, structures, list(matched.values()),
+                     net_sensitivity=_net_sensitivity(idx, list(matched.values()), structures))
     _floorplan_symmetry(ann)
     return ann
 

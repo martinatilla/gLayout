@@ -42,12 +42,16 @@ def test_both_levels_of_the_five_transistor_ota():
     assert d["node_types"]["block"]["names"] == ["DP1", "CM1", "BIAS1"]
     assert _edges(d, "device__in__block") == {("M1", "DP1"), ("M2", "DP1"), ("M4", "CM1"), ("M5", "CM1"),
                                               ("M3", "BIAS1")}
-    assert ("DP1.B", "VSS") in _edges(d, "block_pin__in__net") and ("CM1.B", "VDD") in _edges(d, "block_pin__in__net")
+    pin_nets = _edges(d, "block_pin__in__net")
+    assert ("DP1.B", "VSS") in pin_nets                            # the pair's sources are the tail: own bulk pin
+    assert not any(p == "CM1.B" for p, _ in pin_nets)              # the load's VDD rail is tied to its ring ...
+    assert any(p.startswith("CM1.") and n == "VDD" for p, n in pin_nets)   # ... and is its one VDD pin
     # nets are shared: the block pins land on the device level's net nodes
     assert len(d["node_types"]["net"]["names"]) == len(textbook_schematic("C08").nets())
     dp = _row(d, "block", "DP1")
     assert dp["kind=DP"] == 1 and dp["nfet"] == 1 and dp["devices"] == 2 and dp["variants"] == 3
     assert dp["self_symmetric"] == 1 and dp["area_min_um2"] > 0
+    assert dp["match=precise"] == 1 and _row(d, "block", "BIAS1")["match=precise"] == 0
     assert all(0 <= _row(d, "block_pin", n)["x_rel"] <= 1 for n in d["node_types"]["block_pin"]["names"])
 
 
@@ -81,7 +85,7 @@ def test_hand_written_circuit_gets_the_block_level_only():
                 self_symmetric=["A", "L"], ports=["N1", "VDD", "VSS"])
     d = c.hetero_graph().to_dict()
     assert validate_graph(d) == [] and d["meta"]["level"] == "block"
-    assert set(d["node_types"]) == {"block", "block_pin", "net"}
+    assert set(d["node_types"]) == {"block", "variant", "block_pin", "net"}
     assert sorted(d["node_types"]["net"]["names"]) == ["N1", "N2", "VDD", "VSS"]
     assert _row(d, "net", "N1")["port"] == 1 and _row(d, "block", "L")["kind=CM"] == 1
 

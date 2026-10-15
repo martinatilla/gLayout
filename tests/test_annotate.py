@@ -179,6 +179,30 @@ def test_transmission_gate():
     assert _blocks_str(ann) == "TG(MN) TG(MP)"
 
 
+def test_matching_classes():
+    c08 = annotate(_schematic("C08"))
+    assert {m.devices: m.precision for m in c08.matched} == {("M1", "M2"): "precise", ("M4", "M5"): "moderate"}
+    assert {b.name: b.matching for b in c08.blocks} == {"DP1": "precise", "CM1": "moderate", "BIAS1": "none"}
+    c11 = annotate(_schematic("C11"))
+    assert {m.devices: m.precision for m in c11.matched}[("M1", "M2", "M7")] == "minimal"      # bias bank
+    c13 = {m.devices: m.precision for m in annotate(_schematic("C13")).matched}
+    assert c13[("M3", "M5")] == c13[("M2", "M4")] == "moderate" and c13[("M1", "M2")] == "minimal"
+    c16 = {m.devices: m.precision for m in annotate(_schematic("C16")).matched}
+    assert c16 == {("M1", "M2"): "precise", ("R1", "R2"): "moderate"}                           # passive loads
+
+
+def test_net_sensitivity():
+    assert annotate(_schematic("C08")).net_sensitivity == {
+        "VDD": "supply", "VSS": "supply", "VIN1": "sensitive", "VIN2": "sensitive", "VOUT1": "sensitive",
+        "VB1": "other", "net22": "other", "net23": "other"}        # net22 is held by the diode, net23 by sources
+    c13 = annotate(_schematic("C13")).net_sensitivity
+    assert c13["IIN1"] == "other" and c13["IOUT1"] == "sensitive"  # IIN1 is held through the cascode diode
+    sens = annotate(parse_analoggenie("MN (A VCLK B VSS) nmos4\nMI1 (CLKB VCLK VSS VSS) nmos4\n"
+                                      "MI2 (CLKB VCLK VDD VDD) pmos4\nMP (A CLKB B VDD) pmos4\n", "tg",
+                                      ["A", "B", "VCLK", "VDD", "VSS"])).net_sensitivity
+    assert sens["VCLK"] == "noisy" and sens["CLKB"] == "noisy"      # an inverter of a clock is a clock
+
+
 def test_random_netlists_keep_the_block_invariants():
     import random
     rng = random.Random(0)

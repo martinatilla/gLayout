@@ -17,6 +17,10 @@ _FAMILY = {"nfet": "mos", "pfet": "mos", "npn": "bjt", "pnp": "bjt", "res": "two
 NET_CLASSES = ("power", "ground", "bias", "clock", "signal")
 BLOCK_KINDS = ("DP", "CM", "CMB", "CASC", "CS", "SF", "INV", "TG", "CAP", "RES", "BIAS", "OTHER")
 STRUCTURES = ("dp", "degenerated_dp", "ccp", "mirror", "inverter", "tg", "stack")
+# how closely a matched set must match (Hastings, The Art of Analog Layout: minimal / moderate / precise)
+MATCH_CLASSES = ("precise", "moderate", "minimal")
+# what a net is in a coupling sense; "other" is everything else (low-impedance internal nodes, bias lines)
+SENSITIVITY = ("sensitive", "noisy", "supply", "other")
 SIDES = "NESW"
 LAYERS = ("met1", "met2", "met3", "met4", "met5")
 

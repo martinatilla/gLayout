@@ -90,7 +90,7 @@ class Circuit:
         return "signal"
 
     def hetero_graph(self):
-        """Device + block heterograph for learning (``glayout.schematic.graph``, schema v1).
+        """Device + block heterograph for learning (``glayout.schematic.graph``, schema v2).
 
         Both levels when the circuit comes from a schematic, the block level otherwise.
         ``graph()`` below is the block-only graph of the paper, unchanged.
