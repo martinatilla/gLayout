@@ -244,8 +244,10 @@ def finger_sequence_row(
         with pt.stage("Gate↔S/D ties") as st:
             ties = [n for n in gate_rails if f"{n}_sd_W" in row.ports] if tie_gate_to_sd else []
             maxsep = pdk.util_max_metal_seperation()
+            tie_sides = {}
             for i, net in enumerate(ties):
                 side = "W" if i % 2 == 0 else "E"
+                tie_sides[net] = side
                 ext = (3 + 4 * (i // 2)) * maxsep
                 row << c_route(pdk, row.ports[f"{net}_sd_{side}"], row.ports[f"{net}_gate_{side}"],
                                extension=ext, viaoffset=False)
@@ -275,6 +277,7 @@ def finger_sequence_row(
     out.info["sd_rails"] = [n for n in sd_order if n in rail_y]
     out.info["gate_rails"] = list(gate_rails)
     out.info["centroids_um"] = {d: round(x, 4) for d, x in centroids.items()}
+    out.info["tie_sides"] = tie_sides            # net -> row side its gate/S-D tie leaves from
     out.info["centroid_error_um"] = round(cerr, 6)
     return out
 
