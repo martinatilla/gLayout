@@ -90,6 +90,32 @@ def test_hand_written_circuit_gets_the_block_level_only():
     assert _row(d, "net", "N1")["port"] == 1 and _row(d, "block", "L")["kind=CM"] == 1
 
 
+def test_cell_parasitics_become_variant_loads_and_coupling_nodes():
+    from glayout.schematic.model import net_class
+
+    c = schematic_to_circuit(pdk, textbook_schematic("C08"))
+    d0 = c.hetero_graph().to_dict()
+    assert d0["meta"]["cell_parasitics"] is False and "cell_coupling" not in d0["node_types"]
+    inst = c["DP1"]
+    var = inst.block.variants[0]
+    a, b = [p for p in var.pins if net_class(inst.nets[p]) not in ("power", "ground")][:2]
+    var.parasitics = [(a, "VSUBS", 1.0e-15), (a, "B", 0.5e-15),     # to ground: substrate and the VSS body pin
+                      (a, b, 0.25e-15),                              # between two signal nets
+                      ("B", "VSUBS", 3.0e-15),                       # ground to ground: not a load
+                      ("n99", a, 9.0e-15)]                           # a net the block does not export: skipped
+    d = c.hetero_graph().to_dict()
+    assert validate_graph(d) == [] and d["meta"]["cell_parasitics"] is True
+    loads = d["edge_types"]["variant__loads__net"]
+    assert loads["stage"] == "schematic" and loads["attr_names"] == ["c_fF"]
+    got = {(d["node_types"]["variant"]["names"][v], d["node_types"]["net"]["names"][n]): at[0]
+           for v, n, at in zip(*loads["index"], loads["attr"])}
+    assert got == {("DP1.v0", inst.nets[a]): 1.5}
+    cc = d["node_types"]["cell_coupling"]
+    assert cc["stage"] == "schematic" and [r[0] for r in cc["x"]] == [0.25]
+    assert _edges(d, "variant__has__cell_coupling") == {("DP1.v0", cc["names"][0])}
+    assert _edges(d, "cell_coupling__on__net") == {(cc["names"][0], inst.nets[a]), (cc["names"][0], inst.nets[b])}
+
+
 def test_legacy_block_graph_still_works_on_derived_circuits():
     c = schematic_to_circuit(pdk, textbook_schematic("C08"))
     legacy = c.graph().to_dict()

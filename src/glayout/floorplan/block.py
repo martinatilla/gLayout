@@ -71,6 +71,9 @@ class Variant:
     pins: dict[str, Pin]
     component: Optional[Component] = None
     pad: Padding = field(default_factory=Padding)
+    # capacitors of the cell extracted on its own: (net a, net b, F), nets named by the block's pin nets,
+    # VSUBS for the substrate (glayout.evaluation.cells); None when not extracted
+    parasitics: Optional[list[tuple[str, str, float]]] = None
 
     @property
     def area(self) -> float:

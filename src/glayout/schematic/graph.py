@@ -1,4 +1,4 @@
-"""Heterogeneous circuit graph for learning (schema v2).
+"""Heterogeneous circuit graph for learning (schema v2.1).
 
 Two levels share one set of net nodes:
 
@@ -12,6 +12,14 @@ Two levels share one set of net nodes:
   its smallest variant); edges ``block→variant``, ``block→block_pin``,
   ``block_pin→net``, ``block↔block`` for symmetric block pairs, and
   ``device→block`` linking the levels.
+- **cell parasitics** (when the variants were extracted on their own,
+  ``glayout.evaluation.cells``): ``variant→net`` edges with the capacitance the
+  variant's cell puts on that net to ground (substrate and supplies), and one
+  ``cell_coupling`` node per variant and pair of signal nets coupled inside the
+  cell, with edges ``variant→cell_coupling`` and ``cell_coupling→net`` (two).
+  The cell exists before floorplanning, so these are schematic-stage; in
+  context they add up to the extracted layout's values (wiring outside the
+  cells is the router's, ``layout_graph``).
 
 Both levels are stage ``schematic``. ``glayout.schematic.layout_graph`` adds
 the stage ``layout`` to the same graph without re-indexing anything: labels
@@ -45,7 +53,8 @@ from glayout.schematic.vocab import (
 
 # 1.1: matching class (device, block) and net sensitivity features
 # 2.0: variant nodes; stages; layout labels, segment nodes and coupling edges (glayout.schematic.layout_graph)
-SCHEMA_VERSION = "2.0"
+# 2.1: cell parasitics per variant (variant__loads__net, cell_coupling nodes)
+SCHEMA_VERSION = "2.1"
 
 FEATURES: dict[str, list[str]] = {
     "device": [*(f"kind={k}" for k in DEVICE_KINDS), "sized", "w_um", "l_um", "fingers_base", "diode",
@@ -61,6 +70,8 @@ FEATURES: dict[str, list[str]] = {
                   *(f"layer={l}" for l in LAYERS), "x_rel", "y_rel"],
     "variant": ["fingers", "finger_w_um", "length_um", "width_um", "height_um", "area_um2", "aspect", "area_rel",
                 "pins", "centroid_error_um"],
+    # capacitance between two signal nets inside one variant's cell
+    "cell_coupling": ["c_fF"],
     # layout stage: one straight wire on one layer (between vias), or a landing stub
     "segment": [*(f"layer={l}" for l in LAYERS), "stub", "horizontal", "length_um",
                 "x0_rel", "y0_rel", "x1_rel", "y1_rel"],
@@ -84,6 +95,9 @@ EDGE_TYPES: dict[str, tuple[str, str]] = {
     "block_pin__in__net": ("block_pin", "net"),
     "block__symmetric__block": ("block", "block"),
     "block__has__variant": ("block", "variant"),
+    "variant__loads__net": ("variant", "net"),
+    "variant__has__cell_coupling": ("variant", "cell_coupling"),
+    "cell_coupling__on__net": ("cell_coupling", "net"),
     "segment__of__net": ("segment", "net"),
     "segment__at__block_pin": ("segment", "block_pin"),
     "segment__connects__segment": ("segment", "segment"),
@@ -91,6 +105,7 @@ EDGE_TYPES: dict[str, tuple[str, str]] = {
     "net__coupled__net": ("net", "net"),
 }
 EDGE_ATTRS: dict[str, list[str]] = {
+    "variant__loads__net": ["c_fF"],
     "segment__beside__segment": ["parallel_um", "crossings"],
     "net__coupled__net": ["parallel_um", "crossings"],
 }
@@ -305,6 +320,38 @@ def _variant_features(v, min_area: float) -> list[float]:
             v.width / v.height if v.height else 0.0, v.area / min_area if min_area else 0.0, len(v.pins), cerr]
 
 
+def _cell_parasitics(g: HeteroGraph, inst, var, vi: int, vname: str, net_idx: dict[str, int]) -> None:
+    """A variant's own capacitors as ``variant__loads__net`` (to ground) and ``cell_coupling`` (signal pairs).
+    Ground is the substrate and every power or ground net; a net the instance does not export is skipped."""
+    def circuit_net(n: str) -> Optional[str]:
+        if n.upper() == "VSUBS":
+            return "VSUBS"
+        cn = inst.nets.get(n)
+        return cn if cn in net_idx else None
+
+    def grounded(cn: str) -> bool:
+        return cn == "VSUBS" or net_class(cn) in ("power", "ground")
+
+    to_ground, pairs = {}, {}
+    for a, b, c in var.parasitics:
+        na, nb = circuit_net(a), circuit_net(b)
+        if na is None or nb is None or na == nb or (grounded(na) and grounded(nb)):
+            continue
+        if grounded(na) or grounded(nb):
+            n = nb if grounded(na) else na
+            to_ground[n] = to_ground.get(n, 0.0) + c
+        else:
+            k = tuple(sorted((na, nb)))
+            pairs[k] = pairs.get(k, 0.0) + c
+    for n, c in sorted(to_ground.items()):
+        g._add_edge("variant__loads__net", vi, net_idx[n], [c * 1e15])
+    for (a, b), c in sorted(pairs.items()):
+        ci = g._add_node("cell_coupling", f"{vname}:{a}|{b}", [c * 1e15])
+        g._add_edge("variant__has__cell_coupling", vi, ci)
+        g._add_edge("cell_coupling__on__net", ci, net_idx[a])
+        g._add_edge("cell_coupling__on__net", ci, net_idx[b])
+
+
 def circuit_graph(circuit) -> HeteroGraph:
     """Both levels for a floorplan ``Circuit`` built from a schematic; the block level alone otherwise."""
     sch: Optional[Schematic] = circuit.schematic
@@ -325,7 +372,7 @@ def circuit_graph(circuit) -> HeteroGraph:
                                                     *one_hot(None, SENSITIVITY)])
     ann_blocks = {b.name: b for b in ann.blocks} if ann is not None else {}
     paired = {n for p in circuit.symmetric_pairs for n in p}
-    blk_idx = {}
+    blk_idx, var_idx = {}, {}
     for inst in circuit.instances:
         v = min(inst.block.variants, key=lambda v: v.area)
         ab = ann_blocks.get(inst.name)
@@ -337,7 +384,8 @@ def circuit_graph(circuit) -> HeteroGraph:
             float(inst.name in circuit.self_symmetric), float(inst.name in paired),
             *one_hot(ab.matching if ab else None, MATCH_CLASSES)])
         for k, var in enumerate(inst.block.variants):
-            vi = g._add_node("variant", f"{inst.name}.v{k}", _variant_features(var, inst.block.area))
+            var_idx[(inst.name, k)] = vi = g._add_node("variant", f"{inst.name}.v{k}",
+                                                        _variant_features(var, inst.block.area))
             g._add_edge("block__has__variant", bi, vi)
         for bnet, pin in v.pins.items():
             cnet = inst.nets[bnet]
@@ -354,6 +402,11 @@ def circuit_graph(circuit) -> HeteroGraph:
         if ab is not None:
             for d in ab.devices:
                 g._add_edge("device__in__block", dev_idx[d], bi)
+        for k, var in enumerate(inst.block.variants):
+            if var.parasitics is not None:
+                _cell_parasitics(g, inst, var, var_idx[(inst.name, k)], f"{inst.name}.v{k}", net_idx)
+    g.meta["cell_parasitics"] = any(var.parasitics is not None for inst in circuit.instances
+                                    for var in inst.block.variants)
     for a, b in circuit.symmetric_pairs:
         g._add_edge("block__symmetric__block", blk_idx[a], blk_idx[b])
         g._add_edge("block__symmetric__block", blk_idx[b], blk_idx[a])
