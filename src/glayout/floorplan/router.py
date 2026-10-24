@@ -458,12 +458,16 @@ def _try_landing(grid: RoutingGrid, pin: RouterPin, opt: AccessOption, claimed: 
         clash = False
         for other in claimed:
             same = other.pin.net == pin.net
-            for lay, r in shapes:
-                for ol, orr in other.shapes:
+            for k, (lay, r) in enumerate(shapes):
+                for ok, (ol, orr) in enumerate(other.shapes):
                     if lay != ol or not _too_close(r, orr, t.layer_sep.get(lay, 0.0)):
                         continue
                     gx, gy = _gap(r, orr)
-                    if not (same and gx <= 0 and gy <= 0):     # same net may overlap, not nearly touch
+                    # same net may overlap, not nearly touch. Two via pads (index > 0; 0 is the stub)
+                    # may only overlap when concentric: off-centre, their via cuts sit closer than
+                    # the cut spacing (gf180 V2.2a/V3.2a: two VDD landings 0.49um apart)
+                    concentric = abs(x - other.x) < 1e-6 and abs(y - other.y) < 1e-6
+                    if not (same and gx <= 0 and gy <= 0 and (k == 0 or ok == 0 or concentric)):
                         clash = True
                         break
                 if clash:
@@ -628,7 +632,10 @@ def bidirectional_astar(grid: RoutingGrid, net: str, source: tuple, target_tree:
     if source in target_tree:
         return [source]
     sides = []
-    for starts, goal in (([source], target_hint), (list(target_tree), source)):
+    # the tree's order is the heap's tie-break: a set's order follows string hashing (pin nodes are
+    # ("P", k)), which changes with every interpreter, and so did the routes; sort it instead
+    tree = sorted(target_tree, key=lambda n: (1, n[1], 0, 0) if n[0] == "P" else (0, *n))
+    for starts, goal in (([source], target_hint), (tree, source)):
         g = {s: 0.0 for s in starts}
         parent = {s: None for s in starts}
         heap = [(_f(0.0, h(s, goal), t.kappa), k, s) for k, s in enumerate(starts)]

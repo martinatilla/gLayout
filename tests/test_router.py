@@ -9,7 +9,8 @@ os.environ.setdefault("GLAYOUT_TABLES", "0")
 from dataclasses import replace  # noqa: E402
 
 from glayout.floorplan.router import (  # noqa: E402
-    AccessOption, RouterPin, RouterTech, RoutingProblem, _f, _too_close, detours, route,
+    AccessOption, RouterPin, RouterTech, RoutingGrid, RoutingProblem, _f, _too_close, bidirectional_astar, detours,
+    route,
 )
 
 
@@ -97,6 +98,43 @@ def test_close_pins_on_one_side_are_staggered():
     assert _shapes_ok(rr)
     xs = sorted(l.x for ls in rr.landings.values() for l in ls if l.option.side == "E")
     assert len(set(xs)) > 1              # could not all land on the same column
+
+
+def test_same_net_via_pads_overlap_only_when_concentric():
+    # a block's rail and its tie ring on one net, 0.49 apart on the same side (sch_c07_routed, gf180):
+    # their via pads overlap, and off-centre via cuts break the cut spacing (V2.2a/V3.2a).
+    # gf180-like numbers: pitch 0.8, via pads 0.5, spacing 0.3
+    pads = {"met2": 0.5, "met3": 0.5, "met4": 0.5}
+    tech = RouterTech(("met3", "met4"), 0.8, (0.5, 0.5), (0.3, 0.3), {f"met{i}": 0.3 for i in range(1, 6)},
+                      {(pl, z): dict(pads) for pl in ("met1", "met2") for z in (0, 1)})
+    cells = [(2.0, 4.0, 4.0, 16.0), (16.0, 4.0, 18.0, 16.0)]
+    nets = {"V": [_pin("V", "A.rail", 0, "E", 4.0, 9.6), _pin("V", "A.B", 0, "E", 4.0, 10.09),
+                  _pin("V", "B.rail", 1, "W", 16.0, 10.0)]}     # the old rule landed both at x=5.2
+    rr = route(RoutingProblem(20, 20, cells, nets), tech)
+    assert rr.success
+    lands = rr.landings["V"]
+    for i, a in enumerate(lands):
+        for b in lands[i + 1:]:
+            concentric = abs(a.x - b.x) < 1e-6 and abs(a.y - b.y) < 1e-6
+            for la, ra in a.shapes[1:]:
+                for lb, rb in b.shapes[1:]:
+                    assert concentric or la != lb or not _too_close(ra, rb, 0.3), (a.pin.owner, b.pin.owner)
+
+
+class _ReversedSet(set):
+    """A set that iterates in another order, as a different string-hash seed can make it do."""
+    def __iter__(self):
+        return iter(sorted(set.__iter__(self), key=repr, reverse=True))
+
+
+def test_astar_does_not_depend_on_the_target_sets_order():
+    # two targets equally far from the source: the tie used to be broken by the set's iteration order,
+    # which follows string hashing (pin nodes are ("P", k)), so routes changed between interpreters
+    grid = RoutingGrid(RoutingProblem(10.0, 10.0, [], {}), RouterTech.abstract())
+    tree = [(0, 9, 3), (0, 9, 7)]
+    a = bidirectional_astar(grid, "N", (0, 0, 5), set(tree), tree[0], {}, {})
+    b = bidirectional_astar(grid, "N", (0, 0, 5), _ReversedSet(tree), tree[0], {}, {})
+    assert a == b
 
 
 def test_side_ties_spread_over_both_channels():
