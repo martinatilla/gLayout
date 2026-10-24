@@ -55,10 +55,11 @@ def test_smart_route_skips_terminals_already_joined():
     top = Component("t")
     row = top << two_nfet_interdigitized(pdk, numcols=2, nets=MIRROR_NETS, with_substrate_tap=False)
     top.add_ports(row.get_ports_list(), prefix="cm_")
+    # both backends wrap a gdstk.Cell; the gdstk backend's Component has no get_polygons()
     r = smart_route(pdk, top.ports["cm_A_source_W"], top.ports["cm_B_source_W"], row, top)
-    assert len(r.get_polygons()) == 0
+    assert len(r._cell.get_polygons()) == 0
     r = smart_route(pdk, top.ports["cm_A_gate_W"], top.ports["cm_A_drain_W"], row, top)
-    assert len(r.get_polygons()) == 0                               # the diode tie is already drawn
+    assert len(r._cell.get_polygons()) == 0                         # the diode tie is already drawn
 
 
 def test_current_mirror_has_no_shorts():
